@@ -33,7 +33,7 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
-glasskit = { path = "../glasskit" }
+glasskit = "0.5"
 nexo-core = { path = "crates/core" }
 serde.workspace = true
 toml = "1"
