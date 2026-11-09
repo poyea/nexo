@@ -8,19 +8,18 @@ mod window;
 mod worker;
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
 use glasskit::events::{Event, EventLoop};
 use nexo_core::{Engine, Folder};
 
-use window::{Action, MainWindow};
+use config::Config;
+use window::{Action, MainWindow, View};
 use worker::Worker;
 
 const APP_NAME: &str = "nexo";
 const CONFIG_FILE: &str = "config.toml";
-/// How often the loop looks for the end of a sync that runs.
-const POLL_EVERY: Duration = Duration::from_millis(250);
 
 const USAGE: &str = "\
 Usage: nexo [--once]
@@ -60,50 +59,57 @@ fn run() -> Result<()> {
     if once {
         let mut engine = engine;
         let report = engine.sync();
-        println!("{}", window::status_of(&report, &now_hhmm()));
+        println!("{}", window::summary(&report, &now_hhmm()));
         for problem in &report.problems {
             println!("  {problem}");
         }
         return Ok(());
     }
-    run_window(Worker::spawn(engine)?, &config.output, config.sync_every())
+    run_window(engine, &config)
 }
 
-fn run_window(mut worker: Worker, output: &Path, every: Duration) -> Result<()> {
+fn run_window(engine: Engine, config: &Config) -> Result<()> {
     let ui = glasskit::Ui::new()?;
     let mut events: EventLoop<()> = EventLoop::new(&ui)?;
-    let mut window = MainWindow::new(&ui, output)?;
-    let mut status = String::from("Starting");
-    let mut problems = Vec::new();
+    let waker = events.waker();
+    let mut worker = Worker::spawn(engine, move || waker.wake())?;
+    let mut autostart = glasskit::autostart::is_enabled(APP_NAME);
+    let mut window = MainWindow::new(&ui, config, autostart)?;
+    let mut view = View::default();
     let mut shown = None;
     let mut next_sync = SystemTime::now();
     loop {
         if !worker.is_busy() && SystemTime::now() >= next_sync {
             worker.start()?;
-            status = "Syncing".into();
         }
         if let Some(report) = worker.poll()? {
-            status = window::status_of(&report, &now_hhmm());
-            problems = report.problems;
-            next_sync = SystemTime::now() + every;
+            view.last = Some((now_hhmm(), report));
+            next_sync = SystemTime::now() + config.sync_every();
         }
-        let state = (status.clone(), problems.clone(), worker.is_busy());
-        if shown.as_ref() != Some(&state) {
-            window.set_status(&state.0, &state.1, state.2);
-            shown = Some(state);
+        view.syncing = worker.is_busy();
+        if shown.as_ref() != Some(&view) {
+            window.set_view(&view);
+            shown = Some(view.clone());
         }
 
-        let wake = if worker.is_busy() {
-            SystemTime::now() + POLL_EVERY
-        } else {
-            next_sync
-        };
-        match events.next(Some(wake))? {
+        // While a sync runs, its end wakes the loop.
+        let deadline = (!worker.is_busy()).then_some(next_sync);
+        match events.next(deadline)? {
             Event::Window(id) if id == window.id() => {
                 for action in window.actions() {
                     match action {
                         Action::SyncNow => next_sync = SystemTime::now(),
-                        Action::OpenFolder => open_folder(output),
+                        Action::OpenFolder => open_folder(&config.output),
+                        Action::ToggleAutostart => {
+                            match glasskit::autostart::set_enabled(APP_NAME, !autostart) {
+                                Ok(()) => autostart = !autostart,
+                                Err(err) => glasskit::show_error(
+                                    APP_NAME,
+                                    &format!("could not change Start with Windows: {err}"),
+                                ),
+                            }
+                            window.set_autostart(autostart);
+                        }
                         Action::Close => return Ok(()),
                     }
                 }

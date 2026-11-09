@@ -4,7 +4,7 @@
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use nexo_core::{Engine, Report};
 
 /// The engine on a thread of its own, so that slow channels do not stop the UI.
@@ -16,7 +16,9 @@ pub struct Worker {
 }
 
 impl Worker {
-    pub fn spawn(mut engine: Engine) -> Result<Self> {
+    /// `on_report` runs on the sync thread each time that a report is ready for
+    /// [`Worker::poll`].
+    pub fn spawn(mut engine: Engine, on_report: impl Fn() + Send + 'static) -> Result<Self> {
         let (requests, todo) = mpsc::channel::<()>();
         let (done, reports) = mpsc::channel();
         let thread = std::thread::Builder::new()
@@ -26,6 +28,7 @@ impl Worker {
                     if done.send(engine.sync()).is_err() {
                         return;
                     }
+                    on_report();
                 }
             })
             .context("starting the sync thread")?;
@@ -62,7 +65,7 @@ impl Worker {
                 Ok(Some(report))
             }
             Err(TryRecvError::Empty) => Ok(None),
-            Err(TryRecvError::Disconnected) => anyhow::bail!("the sync thread has stopped"),
+            Err(TryRecvError::Disconnected) => bail!("the sync thread has stopped"),
         }
     }
 }
@@ -79,6 +82,8 @@ impl Drop for Worker {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+
     use super::*;
     use nexo_core::Folder;
 
@@ -86,20 +91,17 @@ mod tests {
     fn a_sync_gives_one_report() {
         let dir = std::env::temp_dir().join(format!("nexo-worker-{}", std::process::id()));
         let engine = Engine::new(Folder::open(&dir).unwrap()).unwrap();
-        let mut worker = Worker::spawn(engine).unwrap();
+        let (ready, readied) = mpsc::channel();
+        let mut worker = Worker::spawn(engine, move || ready.send(()).unwrap()).unwrap();
         worker.start().unwrap();
         worker.start().unwrap();
         assert!(worker.is_busy());
-        let report = loop {
-            if let Some(report) = worker.poll().unwrap() {
-                break report;
-            }
-            std::thread::yield_now();
-        };
-        assert_eq!(report, Report::default());
+        readied.recv().unwrap();
+        assert_eq!(worker.poll().unwrap(), Some(Report::default()));
         assert!(!worker.is_busy());
         assert!(worker.poll().unwrap().is_none());
         drop(worker);
+        assert!(readied.try_recv().is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

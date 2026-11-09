@@ -1,25 +1,74 @@
 // Copyright (c) 2026 John Law
 // SPDX-License-Identifier: MIT
 
-use std::path::Path;
-
 use anyhow::Result;
 use glasskit::Ui;
 use glasskit::events::WindowId;
-use glasskit::widget::{Button, Card, Column, Id, Insets, Row, Spacer, Text, TextStyle, kind};
+use glasskit::widget::{
+    Align, AnyId, Button, Card, Column, Id, Insets, Length, NavItem, Row, Spacer, Stack, Text,
+    TextStyle, kind,
+};
 use glasskit::window::{Window, WindowEvent};
 use nexo_core::Report;
+
+use crate::config::Config;
+
+const SIDE_WIDTH: f32 = 208.0;
 
 /// What the user asked for in the window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     SyncNow,
     OpenFolder,
+    ToggleAutostart,
     Close,
 }
 
-/// The status line after a sync that ended at `time`, such as `14:05`.
-pub fn status_of(report: &Report, time: &str) -> String {
+/// What the overview page shows.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct View {
+    pub syncing: bool,
+    /// The clock time of the last sync, such as `14:05`, and its report.
+    pub last: Option<(String, Report)>,
+}
+
+impl View {
+    fn headline(&self) -> String {
+        match &self.last {
+            _ if self.syncing => "Syncing".into(),
+            None => "Starting".into(),
+            Some((_, report)) => match report.problems.len() {
+                0 => "Up to date".into(),
+                1 => "1 problem".into(),
+                n => format!("{n} problems"),
+            },
+        }
+    }
+
+    fn detail(&self) -> String {
+        match &self.last {
+            None => "No sync yet".into(),
+            Some((time, _)) => format!("Last sync at {time}"),
+        }
+    }
+
+    /// New messages, sent replies, and problems of the last sync.
+    fn counts(&self) -> [usize; 3] {
+        self.last.as_ref().map_or([0; 3], |(_, report)| {
+            [report.received, report.sent, report.problems.len()]
+        })
+    }
+
+    fn problems(&self) -> String {
+        self.last
+            .as_ref()
+            .map(|(_, report)| report.problems.join("\n"))
+            .unwrap_or_default()
+    }
+}
+
+/// One line for a sync that ended at `time`, such as `14:05`.
+pub fn summary(report: &Report, time: &str) -> String {
     let mut parts = vec![format!("{} new", report.received)];
     if report.sent > 0 {
         parts.push(format!("{} sent", report.sent));
@@ -32,59 +81,182 @@ pub fn status_of(report: &Report, time: &str) -> String {
     format!("Synced at {time}: {}", parts.join(", "))
 }
 
+/// An item of the side list, and the page that it shows.
+struct Tab {
+    item: Id<kind::NavItem>,
+    page: Id<kind::Column>,
+}
+
 pub struct MainWindow {
     window: Window,
-    status: Id<kind::Text>,
+    tabs: Vec<Tab>,
+    headline: Id<kind::Text>,
+    detail: Id<kind::Text>,
+    counts: [Id<kind::Text>; 3],
+    problems_card: Id<kind::Card>,
     problems: Id<kind::Text>,
     sync: Id<kind::Button>,
     open: Id<kind::Button>,
+    autostart: Id<kind::Button>,
+    autostart_state: Id<kind::Text>,
 }
 
 impl MainWindow {
-    pub fn new(ui: &Ui, output: &Path) -> Result<Self> {
-        let mut window = Window::new(ui, "nexo", 520.0, 320.0)?;
-        window.set_min_size(400.0, 280.0);
-        let title = window.add(Text::new("nexo").style(TextStyle::Title));
-        let status = window.add(Text::new("Starting").style(TextStyle::BodyStrong));
-        let problems = window.add(Text::new(""));
-        let lines = window.add(Column::new().gap(8.0).child(status).child(problems));
-        let card = window.add(Card::new().child(lines));
-        let folder = window
-            .add(Text::new(format!("Folder: {}", output.display())).style(TextStyle::Caption));
-        let fill = window.add(Spacer::fill());
-        let gap = window.add(Spacer::fill());
-        let open = window.add(Button::new("Open folder"));
-        let sync = window.add(Button::new("Sync now").accent());
-        let buttons = window.add(Row::new().gap(8.0).child(gap).child(open).child(sync));
-        let root = window.add(
-            Column::new()
-                .padding(Insets::all(24.0))
-                .gap(12.0)
-                .child(title)
-                .child(card)
-                .child(folder)
-                .child(fill)
-                .child(buttons),
+    pub fn new(ui: &Ui, config: &Config, autostart: bool) -> Result<Self> {
+        let mut w = Window::new(ui, "nexo", 860.0, 560.0)?;
+        w.set_min_size(640.0, 420.0);
+
+        let headline = w.add(Text::new("Starting").style(TextStyle::Subtitle));
+        let detail = w.add(Text::new("No sync yet").style(TextStyle::Caption));
+        let sync = w.add(Button::new("Sync now").accent());
+        let status = setting(&mut w, headline, detail, sync);
+        let counts = [(); 3].map(|()| w.add(Text::new("0").style(TextStyle::Title)));
+        let stats: Vec<Id<kind::Card>> = ["New messages", "Replies sent", "Problems"]
+            .into_iter()
+            .zip(counts)
+            .map(|(label, count)| {
+                let label = w.add(Text::new(label).style(TextStyle::Caption));
+                let lines = w.add(Column::new().gap(2.0).child(count).child(label));
+                w.add(Card::new().width(Length::Fill(1.0)).child(lines))
+            })
+            .collect();
+        let stats = w.add(Row::new().gap(12.0).align(Align::Stretch).children(stats));
+        let problems_title = w.add(Text::new("Problems").style(TextStyle::BodyStrong));
+        let problems = w.add(Text::new(""));
+        let lines = w.add(Column::new().gap(8.0).child(problems_title).child(problems));
+        let problems_card = w.add(Card::new().child(lines));
+        w.set_visible(problems_card, false);
+        let overview = page(
+            &mut w,
+            "Overview",
+            vec![status.into(), stats.into(), problems_card.into()],
         );
-        window.set_root(root);
-        window.show();
-        Ok(Self {
-            window,
-            status,
+
+        let none = w.add(Text::new("No channels yet").style(TextStyle::BodyStrong));
+        let about = w.add(Text::new(
+            "A channel brings the messages of one service into your folder, and sends the \
+             replies that you write there.",
+        ));
+        let lines = w.add(Column::new().gap(8.0).child(none).child(about));
+        let empty = w.add(Card::new().child(lines));
+        let channels = page(&mut w, "Channels", vec![empty.into()]);
+
+        let folder_title = w.add(Text::new("Output folder"));
+        let folder =
+            w.add(Text::new(config.output.display().to_string()).style(TextStyle::Caption));
+        let open = w.add(Button::new("Open folder"));
+        let folder = setting(&mut w, folder_title, folder, open);
+        let every = match config.sync_minutes {
+            1 => "Sync every minute".to_owned(),
+            n => format!("Sync every {n} minutes"),
+        };
+        let every = w.add(Text::new(every));
+        let how = w.add(
+            Text::new(
+                "To change the folder or the time, edit config.toml next to the app, then \
+                 start nexo again.",
+            )
+            .style(TextStyle::Caption),
+        );
+        let lines = w.add(Column::new().gap(4.0).child(every).child(how));
+        let schedule = w.add(Card::new().child(lines));
+        let autostart_title = w.add(Text::new("Start with Windows"));
+        let autostart_state = w.add(Text::new("").style(TextStyle::Caption));
+        let autostart_button = w.add(Button::new(""));
+        let startup = setting(&mut w, autostart_title, autostart_state, autostart_button);
+        let settings = page(
+            &mut w,
+            "Settings",
+            vec![folder.into(), schedule.into(), startup.into()],
+        );
+
+        let brand = w.add(Text::new("nexo").style(TextStyle::Subtitle));
+        let brand = w.add(
+            Column::new()
+                .padding(Insets {
+                    left: 16.0,
+                    top: 8.0,
+                    right: 16.0,
+                    bottom: 12.0,
+                })
+                .child(brand),
+        );
+        let items = [
+            w.add(NavItem::new("Overview")),
+            w.add(NavItem::new("Channels")),
+            w.add(NavItem::new("Settings")),
+        ];
+        let gap = w.add(Spacer::fill());
+        let side = w.add(
+            Column::new()
+                .width(Length::Fixed(SIDE_WIDTH))
+                .gap(4.0)
+                .child(brand)
+                .child(items[0])
+                .child(items[1])
+                .child(gap)
+                .child(items[2]),
+        );
+        let pages = [overview, channels, settings];
+        let stack = w.add(Stack::new().width(Length::Fill(1.0)).children(pages));
+        let root = w.add(
+            Row::new()
+                .padding(Insets::all(8.0))
+                .gap(8.0)
+                .align(Align::Stretch)
+                .child(side)
+                .child(stack),
+        );
+        w.set_root(root);
+
+        let mut this = Self {
+            window: w,
+            tabs: items
+                .into_iter()
+                .zip(pages)
+                .map(|(item, page)| Tab { item, page })
+                .collect(),
+            headline,
+            detail,
+            counts,
+            problems_card,
             problems,
             sync,
             open,
-        })
+            autostart: autostart_button,
+            autostart_state,
+        };
+        this.show_tab(0);
+        this.set_autostart(autostart);
+        this.window.show();
+        Ok(this)
     }
 
     pub fn id(&self) -> WindowId {
         self.window.id()
     }
 
-    pub fn set_status(&mut self, status: &str, problems: &[String], syncing: bool) {
-        self.window.set_text(self.status, status);
-        self.window.set_text(self.problems, &problems.join("\n"));
-        self.window.set_enabled(self.sync, !syncing);
+    pub fn set_view(&mut self, view: &View) {
+        self.window.set_text(self.headline, &view.headline());
+        self.window.set_text(self.detail, &view.detail());
+        for (id, count) in self.counts.into_iter().zip(view.counts()) {
+            self.window.set_text(id, &count.to_string());
+        }
+        let problems = view.problems();
+        self.window.set_text(self.problems, &problems);
+        self.window
+            .set_visible(self.problems_card, !problems.is_empty());
+        self.window.set_enabled(self.sync, !view.syncing);
+    }
+
+    pub fn set_autostart(&mut self, on: bool) {
+        let (state, label) = if on {
+            ("On", "Turn off")
+        } else {
+            ("Off", "Turn on")
+        };
+        self.window.set_text(self.autostart_state, state);
+        self.window.set_text(self.autostart, label);
     }
 
     /// The actions that the user took since the last call.
@@ -92,34 +264,121 @@ impl MainWindow {
         let mut actions = Vec::new();
         while let Some(event) = self.window.next_event() {
             match event {
-                WindowEvent::Clicked(id) if id == self.sync => actions.push(Action::SyncNow),
-                WindowEvent::Clicked(id) if id == self.open => actions.push(Action::OpenFolder),
+                WindowEvent::Clicked(id) => {
+                    if let Some(tab) = self.tabs.iter().position(|t| id == t.item) {
+                        self.show_tab(tab);
+                    } else if id == self.sync {
+                        actions.push(Action::SyncNow);
+                    } else if id == self.open {
+                        actions.push(Action::OpenFolder);
+                    } else if id == self.autostart {
+                        actions.push(Action::ToggleAutostart);
+                    }
+                }
                 WindowEvent::CloseRequested => actions.push(Action::Close),
                 _ => {}
             }
         }
         actions
     }
+
+    fn show_tab(&mut self, shown: usize) {
+        for (i, tab) in self.tabs.iter().enumerate() {
+            self.window.set_selected(tab.item, i == shown);
+            self.window.set_visible(tab.page, i == shown);
+        }
+    }
+}
+
+/// A page: a title, then its parts from the top.
+fn page(w: &mut Window, title: &str, parts: Vec<AnyId>) -> Id<kind::Column> {
+    let title = w.add(Text::new(title).style(TextStyle::Title));
+    w.add(
+        Column::new()
+            .padding(Insets {
+                left: 16.0,
+                top: 8.0,
+                right: 16.0,
+                bottom: 16.0,
+            })
+            .gap(12.0)
+            .child(title)
+            .children(parts),
+    )
+}
+
+/// A card with a title and a note at the left, and a button at the right.
+fn setting(
+    w: &mut Window,
+    title: Id<kind::Text>,
+    note: Id<kind::Text>,
+    button: Id<kind::Button>,
+) -> Id<kind::Card> {
+    let lines = w.add(
+        Column::new()
+            .width(Length::Fill(1.0))
+            .gap(4.0)
+            .child(title)
+            .child(note),
+    );
+    let row = w.add(Row::new().gap(12.0).child(lines).child(button));
+    w.add(Card::new().child(row))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn report(received: usize, sent: usize, problems: &[&str]) -> Report {
+        Report {
+            received,
+            sent,
+            problems: problems.iter().map(|&p| p.to_owned()).collect(),
+        }
+    }
+
     #[test]
-    fn status_counts_what_happened() {
-        let report = Report {
-            received: 3,
-            sent: 1,
-            problems: vec!["a".into(), "b".into()],
-        };
+    fn summary_counts_what_happened() {
         assert_eq!(
-            status_of(&report, "14:05"),
+            summary(&report(3, 1, &["a", "b"]), "14:05"),
             "Synced at 14:05: 3 new, 1 sent, 2 problems"
         );
         assert_eq!(
-            status_of(&Report::default(), "09:00"),
+            summary(&report(0, 0, &[]), "09:00"),
             "Synced at 09:00: 0 new"
         );
+    }
+
+    #[test]
+    fn view_before_the_first_sync() {
+        let mut view = View::default();
+        assert_eq!(view.headline(), "Starting");
+        assert_eq!(view.detail(), "No sync yet");
+        assert_eq!(view.counts(), [0, 0, 0]);
+        view.syncing = true;
+        assert_eq!(view.headline(), "Syncing");
+    }
+
+    #[test]
+    fn view_after_a_sync() {
+        let good = View {
+            syncing: false,
+            last: Some(("14:05".into(), report(3, 1, &[]))),
+        };
+        assert_eq!(good.headline(), "Up to date");
+        assert_eq!(good.detail(), "Last sync at 14:05");
+        assert_eq!(good.counts(), [3, 1, 0]);
+        assert_eq!(good.problems(), "");
+
+        let bad = View {
+            syncing: false,
+            last: Some((
+                "14:05".into(),
+                report(0, 0, &["chat: offline", "mail: no key"]),
+            )),
+        };
+        assert_eq!(bad.headline(), "2 problems");
+        assert_eq!(bad.counts(), [0, 0, 2]);
+        assert_eq!(bad.problems(), "chat: offline\nmail: no key");
     }
 }
