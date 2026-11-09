@@ -30,11 +30,11 @@ impl Unit {
         }
     }
 
-    /// The numbers that the unit takes: 5 seconds to one day.
-    fn range(self) -> (u64, u64) {
+    /// The largest number that the unit takes: one day. The smallest is 1.
+    fn max(self) -> u64 {
         match self {
-            Unit::Seconds => (5, 86_400),
-            Unit::Minutes => (1, 1_440),
+            Unit::Seconds => 86_400,
+            Unit::Minutes => 1_440,
         }
     }
 }
@@ -49,11 +49,18 @@ pub struct Interval {
 impl Interval {
     /// The interval that the user typed, or what is wrong with it.
     pub fn parse(text: &str, unit: Unit) -> Result<Self, String> {
-        let (min, max) = unit.range();
+        let max = unit.max();
         match text.trim().parse::<u64>() {
-            Ok(every) if (min..=max).contains(&every) => Ok(Self { every, unit }),
-            _ => Err(format!("Type a number from {min} to {max}.")),
+            Ok(every) if (1..=max).contains(&every) => Ok(Self { every, unit }),
+            _ => Err(format!("Type a number from 1 to {max}.")),
         }
+    }
+
+    /// The part of typed text that can be a positive number: the digits, without zeros at
+    /// the start. Thus the user cannot type zero, a sign, or a point.
+    pub fn digits(text: &str) -> String {
+        let digits: String = text.chars().filter(char::is_ascii_digit).collect();
+        digits.trim_start_matches('0').to_owned()
     }
 
     pub fn duration(self) -> Duration {
@@ -189,13 +196,28 @@ mod tests {
             Ok(interval(1, Unit::Minutes))
         );
         assert_eq!(
-            Interval::parse("4", Unit::Seconds),
-            Err("Type a number from 5 to 86400.".into())
+            Interval::parse("1", Unit::Seconds),
+            Ok(interval(1, Unit::Seconds))
         );
+        assert_eq!(
+            Interval::parse("0", Unit::Seconds),
+            Err("Type a number from 1 to 86400.".into())
+        );
+        assert!(Interval::parse("86401", Unit::Seconds).is_err());
         assert!(Interval::parse("1441", Unit::Minutes).is_err());
         assert!(Interval::parse("", Unit::Minutes).is_err());
         assert!(Interval::parse("-3", Unit::Minutes).is_err());
         assert!(Interval::parse("1.5", Unit::Minutes).is_err());
+    }
+
+    #[test]
+    fn digits_drop_all_that_is_not_a_positive_number() {
+        assert_eq!(Interval::digits("30"), "30");
+        assert_eq!(Interval::digits("0"), "");
+        assert_eq!(Interval::digits("007"), "7");
+        assert_eq!(Interval::digits("-5"), "5");
+        assert_eq!(Interval::digits("1.5x"), "15");
+        assert_eq!(Interval::digits("100"), "100");
     }
 
     #[test]
@@ -221,7 +243,8 @@ mod tests {
         };
         assert!(check("").is_ok());
         assert!(check("sync_every = 0").is_err());
-        assert!(check("sync_every = 2\nsync_unit = \"seconds\"").is_err());
+        assert!(toml::from_str::<Config>(&format!("{OUTPUT}sync_every = -5")).is_err());
+        assert!(check("sync_every = 86401\nsync_unit = \"seconds\"").is_err());
         let relative: Config = toml::from_str("output = 'nexo'").unwrap();
         assert!(relative.check(path).is_err());
         assert!(toml::from_str::<Config>(&format!("{OUTPUT}typo = 1")).is_err());

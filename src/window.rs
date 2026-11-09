@@ -14,7 +14,7 @@ use nexo_core::Report;
 use crate::config::{Config, Interval, Unit};
 
 const SIDE_WIDTH: f32 = 208.0;
-const INTERVAL_HINT: &str = "Type a number, and pick seconds or minutes.";
+const INTERVAL_HINT: &str = "Type a number from 1, and pick seconds or minutes.";
 
 /// What the user asked for in the window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -322,7 +322,12 @@ impl MainWindow {
 
     /// The interval in the text box, if it is valid. If not, the card says why.
     fn read_interval(&mut self) -> Option<Action> {
-        match Interval::parse(&self.window.text(self.interval_box), self.unit) {
+        let typed = self.window.text(self.interval_box);
+        let digits = Interval::digits(&typed);
+        if digits != typed {
+            self.window.set_text(self.interval_box, &digits);
+        }
+        match Interval::parse(&digits, self.unit) {
             Ok(interval) => {
                 self.window
                     .set_text(self.interval_title, &interval.describe());
