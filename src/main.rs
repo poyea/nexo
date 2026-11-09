@@ -4,7 +4,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod config;
-mod tray;
+mod window;
 mod worker;
 
 use std::path::{Path, PathBuf};
@@ -14,7 +14,7 @@ use anyhow::{Context, Result, bail};
 use glasskit::events::{Event, EventLoop};
 use nexo_core::{Engine, Folder};
 
-use tray::{Command, MenuState, Tray};
+use window::{Action, MainWindow};
 use worker::Worker;
 
 const APP_NAME: &str = "nexo";
@@ -25,7 +25,7 @@ const POLL_EVERY: Duration = Duration::from_millis(250);
 const USAGE: &str = "\
 Usage: nexo [--once]
 
-  (no option)  Run in the system tray and sync on a schedule.
+  (no option)  Open the window and sync on a schedule.
   --once       Sync one time, print what happened, then exit.
   --help       Show this help.";
 
@@ -50,7 +50,7 @@ fn run() -> Result<()> {
     };
 
     let Some(_instance) = glasskit::single_instance("nexo.SingleInstance")? else {
-        bail!("nexo is already running. Use its tray icon, or quit it first.");
+        bail!("nexo is already running.");
     };
 
     let config = config::load_or_create(&app_dir()?.join(CONFIG_FILE))?;
@@ -60,37 +60,38 @@ fn run() -> Result<()> {
     if once {
         let mut engine = engine;
         let report = engine.sync();
-        println!("{}", tray::status_of(&report, &now_hhmm()));
+        println!("{}", window::status_of(&report, &now_hhmm()));
         for problem in &report.problems {
             println!("  {problem}");
         }
         return Ok(());
     }
-    run_tray(Worker::spawn(engine)?, &config.output, config.sync_every())
+    run_window(Worker::spawn(engine)?, &config.output, config.sync_every())
 }
 
-fn run_tray(mut worker: Worker, output: &Path, every: Duration) -> Result<()> {
+fn run_window(mut worker: Worker, output: &Path, every: Duration) -> Result<()> {
     let ui = glasskit::Ui::new()?;
-    let mut events = EventLoop::new(&ui)?;
-    let mut tray = Tray::new(&events)?;
-    let mut state = MenuState {
-        status: "Starting".into(),
-        autostart: glasskit::autostart::is_enabled(APP_NAME),
-        ..MenuState::default()
-    };
+    let mut events: EventLoop<()> = EventLoop::new(&ui)?;
+    let mut window = MainWindow::new(&ui, output)?;
+    let mut status = String::from("Starting");
+    let mut problems = Vec::new();
+    let mut shown = None;
     let mut next_sync = SystemTime::now();
     loop {
         if !worker.is_busy() && SystemTime::now() >= next_sync {
             worker.start()?;
-            state.status = "Syncing".into();
+            status = "Syncing".into();
         }
         if let Some(report) = worker.poll()? {
-            state.status = tray::status_of(&report, &now_hhmm());
-            state.problems = report.problems;
+            status = window::status_of(&report, &now_hhmm());
+            problems = report.problems;
             next_sync = SystemTime::now() + every;
         }
-        state.syncing = worker.is_busy();
-        tray.set_menu(state.clone());
+        let state = (status.clone(), problems.clone(), worker.is_busy());
+        if shown.as_ref() != Some(&state) {
+            window.set_status(&state.0, &state.1, state.2);
+            shown = Some(state);
+        }
 
         let wake = if worker.is_busy() {
             SystemTime::now() + POLL_EVERY
@@ -98,13 +99,14 @@ fn run_tray(mut worker: Worker, output: &Path, every: Duration) -> Result<()> {
             next_sync
         };
         match events.next(Some(wake))? {
-            Event::Command(Command::SyncNow) => next_sync = SystemTime::now(),
-            Event::Command(Command::OpenFolder) => open_folder(output),
-            Event::Command(Command::ToggleAutostart) => {
-                let on = !state.autostart;
-                glasskit::autostart::set_enabled(APP_NAME, on)
-                    .context("could not change Start with Windows")?;
-                state.autostart = on;
+            Event::Window(id) if id == window.id() => {
+                for action in window.actions() {
+                    match action {
+                        Action::SyncNow => next_sync = SystemTime::now(),
+                        Action::OpenFolder => open_folder(output),
+                        Action::Close => return Ok(()),
+                    }
+                }
             }
             Event::Quit => return Ok(()),
             _ => {}
