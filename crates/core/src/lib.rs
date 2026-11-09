@@ -7,13 +7,16 @@
 //! - [`Folder`]: the output. Each conversation is a directory with a transcript. The user
 //!   writes a reply in the same directory.
 //! - [`Engine`]: one sync pulls new messages from all sources and sends the waiting replies.
+//! - [`Card`]: a conversation on the board, in the [`Stage`] that its newest message gives.
 
+mod board;
 mod engine;
 mod folder;
 mod fsutil;
 mod model;
 mod source;
 
+pub use board::{Card, Stage};
 pub use engine::{Engine, Report};
 pub use folder::{Folder, PendingReply, files};
 pub use fsutil::write_atomically;

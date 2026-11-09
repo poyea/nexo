@@ -1,15 +1,17 @@
 // Copyright (c) 2026 John Law
 // SPDX-License-Identifier: MIT
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
 use std::fs::OpenOptions;
 use std::io::{ErrorKind, Write as _};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::Local;
 
+use crate::board::{Card, Stage};
 use crate::fsutil::{slug, stable_hash, write_atomically};
 use crate::model::{Conversation, Direction, Message};
 use crate::source::{Update, is_valid_channel};
@@ -30,6 +32,8 @@ pub mod files {
     pub const UNSENT: &str = "unsent.md";
     /// Why nexo could not send `unsent.md`.
     pub const UNSENT_ERROR: &str = "unsent.error.txt";
+    /// The mark of a conversation that is done: the id of its newest message at that time.
+    pub const DONE: &str = "done.txt";
     /// The directory of nexo in the root of the folder.
     pub const STATE_DIR: &str = ".nexo";
 }
@@ -42,8 +46,18 @@ const MAX_SLUG_CHARS: usize = 40;
 /// files in full, and the user starts a send with a rename.
 pub struct Folder {
     root: PathBuf,
-    /// The directory of each conversation, by channel and conversation id.
-    known: BTreeMap<(String, String), PathBuf>,
+    /// The conversations, by channel and conversation id.
+    known: BTreeMap<(String, String), Entry>,
+}
+
+/// What the folder keeps in memory about a conversation.
+struct Entry {
+    dir: PathBuf,
+    title: String,
+    /// The newest message.
+    latest: Option<Message>,
+    /// The contents of `done.txt`, if the file is there.
+    done_at: Option<String>,
 }
 
 /// A reply that the user wants to send.
@@ -93,7 +107,13 @@ impl Folder {
             let name = name.to_owned();
             for dir in subdirectories(&channel)? {
                 if let Some(conversation) = read_conversation(&dir)? {
-                    self.known.insert((name.clone(), conversation.id), dir);
+                    let entry = Entry {
+                        latest: newest(&read_messages(&dir.join(files::MESSAGES))?),
+                        done_at: read_done(&dir)?,
+                        title: conversation.title,
+                        dir,
+                    };
+                    self.known.insert((name.clone(), conversation.id), entry);
                 }
             }
         }
@@ -111,15 +131,62 @@ impl Folder {
             write_atomically(&dir.join(files::CONVERSATION), json)?;
         }
         let added = add_messages(&dir, &update.conversation, &update.messages, changed)?;
-        self.known
-            .insert((channel.to_owned(), update.conversation.id.clone()), dir);
-        Ok(added)
+        let key = (channel.to_owned(), update.conversation.id.clone());
+        let done_at = self.known.get(&key).and_then(|e| e.done_at.clone());
+        let entry = Entry {
+            dir,
+            title: update.conversation.title.clone(),
+            latest: added.latest,
+            done_at,
+        };
+        self.known.insert(key, entry);
+        Ok(added.count)
+    }
+
+    /// All conversations as cards, with the newest message first.
+    pub fn board(&self) -> Vec<Card> {
+        let mut cards: Vec<Card> = self
+            .known
+            .iter()
+            .map(|((channel, id), entry)| Card {
+                channel: channel.clone(),
+                id: id.clone(),
+                title: entry.title.clone(),
+                dir: entry.dir.clone(),
+                stage: Stage::of(entry.latest.as_ref(), entry.done_at.as_deref()),
+                latest: entry.latest.clone(),
+            })
+            .collect();
+        // The sort is stable, so cards of the same time stay in the order of the map.
+        cards.sort_by(|a, b| {
+            let time = |card: &Card| card.latest.as_ref().map(|m| m.sent_at);
+            time(b).cmp(&time(a))
+        });
+        cards
+    }
+
+    /// Mark a conversation as done, or remove the mark. The mark ends when a message comes.
+    pub fn set_done(&mut self, channel: &str, id: &str, done: bool) -> Result<()> {
+        let Some(entry) = self.known.get_mut(&(channel.to_owned(), id.to_owned())) else {
+            bail!("there is no conversation {id:?} in {channel}");
+        };
+        let path = entry.dir.join(files::DONE);
+        if done {
+            let mark = entry.latest.as_ref().map_or("", |m| m.id.as_str());
+            write_atomically(&path, format!("{mark}\n"))?;
+            entry.done_at = Some(mark.to_owned());
+        } else {
+            remove_if_there(&path)?;
+            entry.done_at = None;
+        }
+        Ok(())
     }
 
     /// The replies that wait to be sent, in a fixed order.
     pub fn pending_replies(&self) -> Result<Vec<PendingReply>> {
         let mut replies = Vec::new();
-        for ((channel, _), dir) in &self.known {
+        for ((channel, _), entry) in &self.known {
+            let dir = &entry.dir;
             let path = dir.join(files::SEND);
             let body = match std::fs::read_to_string(&path) {
                 Ok(body) => body,
@@ -143,12 +210,16 @@ impl Folder {
 
     /// Keep the sent message, and remove the reply.
     pub fn record_sent(&mut self, reply: &PendingReply, message: &Message) -> Result<()> {
-        add_messages(
+        let added = add_messages(
             &reply.dir,
             &reply.conversation,
             std::slice::from_ref(message),
             false,
         )?;
+        let key = (reply.channel.clone(), reply.conversation.id.clone());
+        if let Some(entry) = self.known.get_mut(&key) {
+            entry.latest = added.latest;
+        }
         remove_if_there(&reply.dir.join(files::SEND))?;
         remove_if_there(&reply.dir.join(files::UNSENT_ERROR))
     }
@@ -163,11 +234,11 @@ impl Folder {
     }
 
     fn directory_for(&self, channel: &str, conversation: &Conversation) -> PathBuf {
-        if let Some(dir) = self
+        if let Some(entry) = self
             .known
             .get(&(channel.to_owned(), conversation.id.clone()))
         {
-            return dir.clone();
+            return entry.dir.clone();
         }
         let hash = format!("{:08x}", stable_hash(&conversation.id) as u32);
         let name = match slug(&conversation.title, MAX_SLUG_CHARS) {
@@ -217,14 +288,40 @@ fn read_messages(path: &Path) -> Result<Vec<Message>> {
         .collect()
 }
 
+fn read_done(dir: &Path) -> Result<Option<String>> {
+    let path = dir.join(files::DONE);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(Some(text.trim().to_owned())),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
+/// The order of messages in a conversation: by time, then by id.
+fn by_time(a: &Message, b: &Message) -> Ordering {
+    a.sent_at.cmp(&b.sent_at).then_with(|| a.id.cmp(&b.id))
+}
+
+fn newest(messages: &[Message]) -> Option<Message> {
+    messages.iter().max_by(|a, b| by_time(a, b)).cloned()
+}
+
+/// What [`add_messages`] did.
+struct Added {
+    /// How many messages were new.
+    count: usize,
+    /// The newest message of the conversation after the change.
+    latest: Option<Message>,
+}
+
 /// Append the messages that are not there yet, and write the transcript again if there is a
-/// change. Give how many messages were new.
+/// change.
 fn add_messages(
     dir: &Path,
     conversation: &Conversation,
     messages: &[Message],
     force_transcript: bool,
-) -> Result<usize> {
+) -> Result<Added> {
     let path = dir.join(files::MESSAGES);
     let mut all = read_messages(&path)?;
     let mut ids: HashSet<String> = all.iter().map(|m| m.id.clone()).collect();
@@ -249,12 +346,15 @@ fn add_messages(
     if !new.is_empty() || force_transcript {
         write_atomically(&dir.join(files::TRANSCRIPT), transcript(conversation, &all))?;
     }
-    Ok(new.len())
+    Ok(Added {
+        count: new.len(),
+        latest: newest(&all),
+    })
 }
 
 fn transcript(conversation: &Conversation, messages: &[Message]) -> String {
     let mut sorted: Vec<&Message> = messages.iter().collect();
-    sorted.sort_by(|a, b| a.sent_at.cmp(&b.sent_at).then_with(|| a.id.cmp(&b.id)));
+    sorted.sort_by(|a, b| by_time(a, b));
     let mut out = format!("# {}\n\n", conversation.title);
     if !conversation.participants.is_empty() {
         let _ = writeln!(out, "{}\n", conversation.participants.join(", "));
@@ -451,6 +551,67 @@ pub(crate) mod tests {
         assert!(!dir.join(files::UNSENT_ERROR).exists());
         let text = std::fs::read_to_string(dir.join(files::TRANSCRIPT)).unwrap();
         assert!(text.contains("**Jane** (you)"));
+    }
+
+    #[test]
+    fn the_board_has_each_conversation_in_its_stage() {
+        let tmp = TempDir::new("board");
+        let mut folder = Folder::open(&tmp.0).unwrap();
+        let mut mine = message("m2", 5, "Hello");
+        mine.direction = Direction::Out;
+        folder
+            .merge(
+                "chat",
+                &update(conversation("c1", "Jane"), vec![message("m1", 0, "Hi")]),
+            )
+            .unwrap();
+        folder
+            .merge("chat", &update(conversation("c2", "John"), vec![mine]))
+            .unwrap();
+        folder
+            .merge("mail", &update(conversation("c1", "Empty"), vec![]))
+            .unwrap();
+        let board = folder.board();
+        let seen: Vec<(&str, &str, Stage)> = board
+            .iter()
+            .map(|c| (c.channel.as_str(), c.title.as_str(), c.stage))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("chat", "John", Stage::Waiting),
+                ("chat", "Jane", Stage::ToReply),
+                ("mail", "Empty", Stage::Waiting),
+            ]
+        );
+        assert_eq!(board[1].latest.as_ref().unwrap().id, "m1");
+    }
+
+    #[test]
+    fn done_stays_after_a_restart_and_ends_with_a_new_message() {
+        let tmp = TempDir::new("done");
+        let jane = conversation("c1", "Jane");
+        let mut folder = Folder::open(&tmp.0).unwrap();
+        folder
+            .merge("chat", &update(jane.clone(), vec![message("m1", 0, "Hi")]))
+            .unwrap();
+        folder.set_done("chat", "c1", true).unwrap();
+        assert_eq!(folder.board()[0].stage, Stage::Done);
+        assert!(folder.set_done("chat", "no-such", true).is_err());
+
+        let mut folder = Folder::open(&tmp.0).unwrap();
+        assert_eq!(folder.board()[0].stage, Stage::Done);
+        folder.set_done("chat", "c1", false).unwrap();
+        assert_eq!(folder.board()[0].stage, Stage::ToReply);
+
+        folder.set_done("chat", "c1", true).unwrap();
+        folder
+            .merge(
+                "chat",
+                &update(jane, vec![message("m2", 1, "Still there?")]),
+            )
+            .unwrap();
+        assert_eq!(folder.board()[0].stage, Stage::ToReply);
     }
 
     #[test]

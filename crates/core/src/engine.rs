@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::board::Card;
 use crate::folder::{Folder, PendingReply};
 use crate::fsutil::write_atomically;
 use crate::source::{Source, is_valid_channel};
@@ -72,6 +73,16 @@ impl Engine {
         }
         self.sources.push(source);
         Ok(())
+    }
+
+    /// All conversations as cards, with the newest message first.
+    pub fn board(&self) -> Vec<Card> {
+        self.folder.board()
+    }
+
+    /// Mark a conversation as done, or remove the mark.
+    pub fn set_done(&mut self, channel: &str, id: &str, done: bool) -> Result<()> {
+        self.folder.set_done(channel, id, done)
     }
 
     pub fn channels(&self) -> impl Iterator<Item = &str> {
