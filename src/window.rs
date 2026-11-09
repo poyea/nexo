@@ -6,14 +6,15 @@ use glasskit::Ui;
 use glasskit::events::WindowId;
 use glasskit::widget::{
     Align, AnyId, Button, Card, Column, Id, Insets, Length, NavItem, Row, Spacer, Stack, Text,
-    TextStyle, kind,
+    TextBox, TextStyle, kind,
 };
 use glasskit::window::{Window, WindowEvent};
 use nexo_core::Report;
 
-use crate::config::Config;
+use crate::config::{Config, Interval, Unit};
 
 const SIDE_WIDTH: f32 = 208.0;
+const INTERVAL_HINT: &str = "Type a number, and pick seconds or minutes.";
 
 /// What the user asked for in the window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +22,7 @@ pub enum Action {
     SyncNow,
     OpenFolder,
     ToggleAutostart,
+    SetInterval(Interval),
     Close,
 }
 
@@ -99,6 +101,11 @@ pub struct MainWindow {
     open: Id<kind::Button>,
     autostart: Id<kind::Button>,
     autostart_state: Id<kind::Text>,
+    interval_title: Id<kind::Text>,
+    interval_note: Id<kind::Text>,
+    interval_box: Id<kind::TextBox>,
+    units: [(Id<kind::NavItem>, Unit); 2],
+    unit: Unit,
 }
 
 impl MainWindow {
@@ -109,7 +116,7 @@ impl MainWindow {
         let headline = w.add(Text::new("Starting").style(TextStyle::Subtitle));
         let detail = w.add(Text::new("No sync yet").style(TextStyle::Caption));
         let sync = w.add(Button::new("Sync now").accent());
-        let status = setting(&mut w, headline, detail, sync);
+        let status = setting(&mut w, headline, detail, &[sync.into()]);
         let counts = [(); 3].map(|()| w.add(Text::new("0").style(TextStyle::Title)));
         let stats: Vec<Id<kind::Card>> = ["New messages", "Replies sent", "Problems"]
             .into_iter()
@@ -145,29 +152,41 @@ impl MainWindow {
         let folder =
             w.add(Text::new(config.output.display().to_string()).style(TextStyle::Caption));
         let open = w.add(Button::new("Open folder"));
-        let folder = setting(&mut w, folder_title, folder, open);
-        let every = match config.sync_minutes {
-            1 => "Sync every minute".to_owned(),
-            n => format!("Sync every {n} minutes"),
-        };
-        let every = w.add(Text::new(every));
-        let how = w.add(
-            Text::new(
-                "To change the folder or the time, edit config.toml next to the app, then \
-                 start nexo again.",
-            )
-            .style(TextStyle::Caption),
+        let folder = setting(&mut w, folder_title, folder, &[open.into()]);
+        let interval = config.interval();
+        let interval_title = w.add(Text::new(interval.describe()));
+        let interval_note = w.add(Text::new(INTERVAL_HINT).style(TextStyle::Caption));
+        let interval_box = w.add(TextBox::new().max_length(5).width(Length::Fixed(72.0)));
+        w.set_text(interval_box, &interval.every.to_string());
+        let units = [
+            (w.add(NavItem::new("Seconds")), Unit::Seconds),
+            (w.add(NavItem::new("Minutes")), Unit::Minutes),
+        ];
+        let schedule = setting(
+            &mut w,
+            interval_title,
+            interval_note,
+            &[interval_box.into(), units[0].0.into(), units[1].0.into()],
         );
-        let lines = w.add(Column::new().gap(4.0).child(every).child(how));
-        let schedule = w.add(Card::new().child(lines));
         let autostart_title = w.add(Text::new("Start with Windows"));
         let autostart_state = w.add(Text::new("").style(TextStyle::Caption));
         let autostart_button = w.add(Button::new(""));
-        let startup = setting(&mut w, autostart_title, autostart_state, autostart_button);
+        let startup = setting(
+            &mut w,
+            autostart_title,
+            autostart_state,
+            &[autostart_button.into()],
+        );
+        let how = w.add(
+            Text::new(
+                "To change the folder, edit config.toml next to the app, then start nexo again.",
+            )
+            .style(TextStyle::Caption),
+        );
         let settings = page(
             &mut w,
             "Settings",
-            vec![folder.into(), schedule.into(), startup.into()],
+            vec![folder.into(), schedule.into(), startup.into(), how.into()],
         );
 
         let brand = w.add(Text::new("nexo").style(TextStyle::Subtitle));
@@ -225,7 +244,13 @@ impl MainWindow {
             open,
             autostart: autostart_button,
             autostart_state,
+            interval_title,
+            interval_note,
+            interval_box,
+            units,
+            unit: interval.unit,
         };
+        this.show_unit();
         this.show_tab(0);
         this.set_autostart(autostart);
         this.window.show();
@@ -273,13 +298,42 @@ impl MainWindow {
                         actions.push(Action::OpenFolder);
                     } else if id == self.autostart {
                         actions.push(Action::ToggleAutostart);
+                    } else if let Some(&(_, unit)) = self.units.iter().find(|(u, _)| id == *u) {
+                        self.unit = unit;
+                        self.show_unit();
+                        actions.extend(self.read_interval());
                     }
+                }
+                WindowEvent::Changed(id) if id == self.interval_box => {
+                    actions.extend(self.read_interval());
                 }
                 WindowEvent::CloseRequested => actions.push(Action::Close),
                 _ => {}
             }
         }
         actions
+    }
+
+    fn show_unit(&mut self) {
+        for (item, unit) in self.units {
+            self.window.set_selected(item, unit == self.unit);
+        }
+    }
+
+    /// The interval in the text box, if it is valid. If not, the card says why.
+    fn read_interval(&mut self) -> Option<Action> {
+        match Interval::parse(&self.window.text(self.interval_box), self.unit) {
+            Ok(interval) => {
+                self.window
+                    .set_text(self.interval_title, &interval.describe());
+                self.window.set_text(self.interval_note, INTERVAL_HINT);
+                Some(Action::SetInterval(interval))
+            }
+            Err(why) => {
+                self.window.set_text(self.interval_note, &why);
+                None
+            }
+        }
     }
 
     fn show_tab(&mut self, shown: usize) {
@@ -307,12 +361,12 @@ fn page(w: &mut Window, title: &str, parts: Vec<AnyId>) -> Id<kind::Column> {
     )
 }
 
-/// A card with a title and a note at the left, and a button at the right.
+/// A card with a title and a note at the left, and controls at the right.
 fn setting(
     w: &mut Window,
     title: Id<kind::Text>,
     note: Id<kind::Text>,
-    button: Id<kind::Button>,
+    controls: &[AnyId],
 ) -> Id<kind::Card> {
     let lines = w.add(
         Column::new()
@@ -321,7 +375,12 @@ fn setting(
             .child(title)
             .child(note),
     );
-    let row = w.add(Row::new().gap(12.0).child(lines).child(button));
+    let row = w.add(
+        Row::new()
+            .gap(8.0)
+            .child(lines)
+            .children(controls.iter().copied()),
+    );
     w.add(Card::new().child(row))
 }
 

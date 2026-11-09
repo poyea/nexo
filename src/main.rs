@@ -52,7 +52,8 @@ fn run() -> Result<()> {
         bail!("nexo is already running.");
     };
 
-    let config = config::load_or_create(&app_dir()?.join(CONFIG_FILE))?;
+    let config_path = app_dir()?.join(CONFIG_FILE);
+    let config = config::load_or_create(&config_path)?;
     let engine = Engine::new(Folder::open(&config.output)?)?;
     eprintln!("output folder: {}", config.output.display());
 
@@ -65,16 +66,16 @@ fn run() -> Result<()> {
         }
         return Ok(());
     }
-    run_window(engine, &config)
+    run_window(engine, config, &config_path)
 }
 
-fn run_window(engine: Engine, config: &Config) -> Result<()> {
+fn run_window(engine: Engine, mut config: Config, config_path: &Path) -> Result<()> {
     let ui = glasskit::Ui::new()?;
     let mut events: EventLoop<()> = EventLoop::new(&ui)?;
     let waker = events.waker();
     let mut worker = Worker::spawn(engine, move || waker.wake())?;
     let mut autostart = glasskit::autostart::is_enabled(APP_NAME);
-    let mut window = MainWindow::new(&ui, config, autostart)?;
+    let mut window = MainWindow::new(&ui, &config, autostart)?;
     let mut view = View::default();
     let mut shown = None;
     let mut next_sync = SystemTime::now();
@@ -84,7 +85,7 @@ fn run_window(engine: Engine, config: &Config) -> Result<()> {
         }
         if let Some(report) = worker.poll()? {
             view.last = Some((now_hhmm(), report));
-            next_sync = SystemTime::now() + config.sync_every();
+            next_sync = SystemTime::now() + config.interval().duration();
         }
         view.syncing = worker.is_busy();
         if shown.as_ref() != Some(&view) {
@@ -110,6 +111,13 @@ fn run_window(engine: Engine, config: &Config) -> Result<()> {
                             }
                             window.set_autostart(autostart);
                         }
+                        Action::SetInterval(interval) if interval != config.interval() => {
+                            match config.save_interval(config_path, interval) {
+                                Ok(()) => next_sync = SystemTime::now() + interval.duration(),
+                                Err(err) => glasskit::show_error(APP_NAME, &format!("{err:#}")),
+                            }
+                        }
+                        Action::SetInterval(_) => {}
                         Action::Close => return Ok(()),
                     }
                 }

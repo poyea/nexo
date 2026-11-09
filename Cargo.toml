@@ -37,6 +37,7 @@ glasskit = "0.5"
 nexo-core = { path = "crates/core" }
 serde.workspace = true
 toml = "1"
+toml_edit = "0.25"
 
 [build-dependencies]
 embed-manifest = "1.5"
