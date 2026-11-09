@@ -3,6 +3,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod board;
 mod config;
 mod window;
 mod worker;
@@ -14,6 +15,7 @@ use anyhow::{Context, Result, bail};
 use glasskit::events::{Event, EventLoop};
 use nexo_core::{Engine, Folder};
 
+use board::BoardAction;
 use config::Config;
 use window::{Action, MainWindow, View};
 use worker::Worker;
@@ -78,23 +80,33 @@ fn run_window(engine: Engine, mut config: Config, config_path: &Path) -> Result<
     let mut window = MainWindow::new(&ui, &config, autostart)?;
     let mut view = View::default();
     let mut shown = None;
+    let mut board = None;
     let mut next_sync = SystemTime::now();
     loop {
-        if !worker.is_busy() && SystemTime::now() >= next_sync {
-            worker.start()?;
+        if !worker.is_syncing() && SystemTime::now() >= next_sync {
+            worker.sync()?;
         }
-        if let Some(report) = worker.poll()? {
-            view.last = Some((now_hhmm(), report));
-            next_sync = SystemTime::now() + config.interval().duration();
+        while let Some(update) = worker.poll()? {
+            if let Some(report) = update.report {
+                view.last = Some((now_hhmm(), report));
+                next_sync = SystemTime::now() + config.interval().duration();
+            }
+            if let Some(problem) = update.problem {
+                glasskit::show_error(APP_NAME, &problem);
+            }
+            if board.as_ref() != Some(&update.board) {
+                window.set_board(&update.board);
+                board = Some(update.board);
+            }
         }
-        view.syncing = worker.is_busy();
+        view.syncing = worker.is_syncing();
         if shown.as_ref() != Some(&view) {
             window.set_view(&view);
             shown = Some(view.clone());
         }
 
         // While a sync runs, its end wakes the loop.
-        let deadline = (!worker.is_busy()).then_some(next_sync);
+        let deadline = (!worker.is_syncing()).then_some(next_sync);
         match events.next(deadline)? {
             Event::Window(id) if id == window.id() => {
                 for action in window.actions() {
@@ -118,6 +130,10 @@ fn run_window(engine: Engine, mut config: Config, config_path: &Path) -> Result<
                             }
                         }
                         Action::SetInterval(_) => {}
+                        Action::Board(BoardAction::Open(dir)) => open_folder(&dir),
+                        Action::Board(BoardAction::SetDone { channel, id, done }) => {
+                            worker.set_done(channel, id, done)?;
+                        }
                         Action::Close => return Ok(()),
                     }
                 }

@@ -11,18 +11,20 @@ use glasskit::widget::{
 use glasskit::window::{Window, WindowEvent};
 use nexo_core::Report;
 
+use crate::board::{Board, BoardAction};
 use crate::config::{Config, Interval, Unit};
 
 const SIDE_WIDTH: f32 = 208.0;
 const INTERVAL_HINT: &str = "Type a number from 1, and pick seconds or minutes.";
 
 /// What the user asked for in the window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     SyncNow,
     OpenFolder,
     ToggleAutostart,
     SetInterval(Interval),
+    Board(BoardAction),
     Close,
 }
 
@@ -106,12 +108,13 @@ pub struct MainWindow {
     interval_box: Id<kind::TextBox>,
     units: [(Id<kind::NavItem>, Unit); 2],
     unit: Unit,
+    board: Board,
 }
 
 impl MainWindow {
     pub fn new(ui: &Ui, config: &Config, autostart: bool) -> Result<Self> {
-        let mut w = Window::new(ui, "nexo", 860.0, 560.0)?;
-        w.set_min_size(640.0, 420.0);
+        let mut w = Window::new(ui, "nexo", 1000.0, 680.0)?;
+        w.set_min_size(760.0, 660.0);
 
         let headline = w.add(Text::new("Starting").style(TextStyle::Subtitle));
         let detail = w.add(Text::new("No sync yet").style(TextStyle::Caption));
@@ -138,6 +141,9 @@ impl MainWindow {
             "Overview",
             vec![status.into(), stats.into(), problems_card.into()],
         );
+
+        let (board, lanes) = Board::build(&mut w);
+        let board_page = page(&mut w, "Board", vec![lanes.into()]);
 
         let none = w.add(Text::new("No channels yet").style(TextStyle::BodyStrong));
         let about = w.add(Text::new(
@@ -202,6 +208,7 @@ impl MainWindow {
         );
         let items = [
             w.add(NavItem::new("Overview")),
+            w.add(NavItem::new("Board")),
             w.add(NavItem::new("Channels")),
             w.add(NavItem::new("Settings")),
         ];
@@ -213,10 +220,11 @@ impl MainWindow {
                 .child(brand)
                 .child(items[0])
                 .child(items[1])
+                .child(items[2])
                 .child(gap)
-                .child(items[2]),
+                .child(items[3]),
         );
-        let pages = [overview, channels, settings];
+        let pages = [overview, board_page, channels, settings];
         let stack = w.add(Stack::new().width(Length::Fill(1.0)).children(pages));
         let root = w.add(
             Row::new()
@@ -249,6 +257,7 @@ impl MainWindow {
             interval_box,
             units,
             unit: interval.unit,
+            board,
         };
         this.show_unit();
         this.show_tab(0);
@@ -272,6 +281,11 @@ impl MainWindow {
         self.window
             .set_visible(self.problems_card, !problems.is_empty());
         self.window.set_enabled(self.sync, !view.syncing);
+    }
+
+    /// Show these conversations on the board.
+    pub fn set_board(&mut self, cards: &[nexo_core::Card]) {
+        self.board.set(&mut self.window, cards);
     }
 
     pub fn set_autostart(&mut self, on: bool) {
@@ -302,6 +316,8 @@ impl MainWindow {
                         self.unit = unit;
                         self.show_unit();
                         actions.extend(self.read_interval());
+                    } else if let Some(action) = self.board.action(id) {
+                        actions.push(Action::Board(action));
                     }
                 }
                 WindowEvent::Changed(id) if id == self.interval_box => {
