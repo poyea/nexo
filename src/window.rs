@@ -4,9 +4,10 @@
 use anyhow::Result;
 use glasskit::Ui;
 use glasskit::events::WindowId;
+use glasskit::tray::Icon;
 use glasskit::widget::{
-    Align, AnyId, Button, Card, Column, Id, Insets, Length, NavItem, Row, Spacer, Stack, Text,
-    TextBox, TextStyle, kind,
+    Align, AnyId, Button, Card, Column, Id, Insets, Length, NavItem, Row, Scroll, Spacer, Stack,
+    Text, TextBox, TextStyle, kind,
 };
 use glasskit::window::{Window, WindowEvent};
 use nexo_core::Report;
@@ -15,6 +16,7 @@ use crate::board::{Board, BoardAction};
 use crate::config::{Config, Interval, Unit};
 
 const SIDE_WIDTH: f32 = 208.0;
+const ICON_SIZE: u32 = 64;
 const INTERVAL_HINT: &str = "Type a number from 1, and pick seconds or minutes.";
 
 /// What the user asked for in the window.
@@ -143,7 +145,8 @@ impl MainWindow {
         );
 
         let (board, lanes) = Board::build(&mut w);
-        let board_page = page(&mut w, "Board", vec![lanes.into()]);
+        // Each lane scrolls on its own, so the page does not.
+        let board_page = framed(&mut w, "Board", lanes.into());
 
         let none = w.add(Text::new("No channels yet").style(TextStyle::BodyStrong));
         let about = w.add(Text::new(
@@ -262,6 +265,7 @@ impl MainWindow {
         this.show_unit();
         this.show_tab(0);
         this.set_autostart(autostart);
+        this.window.set_icon(&app_icon(ICON_SIZE)?)?;
         this.window.show();
         Ok(this)
     }
@@ -365,8 +369,14 @@ impl MainWindow {
     }
 }
 
-/// A page: a title, then its parts from the top.
+/// A page: a title, then its parts from the top. The parts scroll if the window is short.
 fn page(w: &mut Window, title: &str, parts: Vec<AnyId>) -> Id<kind::Column> {
+    let body = w.add(Scroll::new().gap(12.0).children(parts));
+    framed(w, title, body.into())
+}
+
+/// A page: a title, then a body that fills the rest of the page.
+fn framed(w: &mut Window, title: &str, body: AnyId) -> Id<kind::Column> {
     let title = w.add(Text::new(title).style(TextStyle::Title));
     w.add(
         Column::new()
@@ -378,8 +388,31 @@ fn page(w: &mut Window, title: &str, parts: Vec<AnyId>) -> Id<kind::Column> {
             })
             .gap(12.0)
             .child(title)
-            .children(parts),
+            .child(body),
     )
+}
+
+/// Two rings that link, in blue: the icon of the window.
+fn app_icon(size: u32) -> glasskit::Result<Icon> {
+    let s = size as f32;
+    let centers = [(s * 0.36, s * 0.5), (s * 0.64, s * 0.5)];
+    let (outer, inner) = (s * 0.30, s * 0.18);
+    let mut pixels = Vec::with_capacity((size * size) as usize);
+    for y in 0..size {
+        for x in 0..size {
+            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+            let cover = centers
+                .iter()
+                .map(|(cx, cy)| {
+                    let d = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt();
+                    (outer - d + 0.5).clamp(0.0, 1.0) * (d - inner + 0.5).clamp(0.0, 1.0)
+                })
+                .fold(0.0f32, f32::max);
+            let a = (cover * 255.0) as u32;
+            pixels.push((a << 24) | (0x2E << 16) | (0x86 << 8) | 0xDE);
+        }
+    }
+    Icon::from_argb(size, pixels)
 }
 
 /// A card with a title and a note at the left, and controls at the right.
@@ -415,6 +448,11 @@ mod tests {
             sent,
             problems: problems.iter().map(|&p| p.to_owned()).collect(),
         }
+    }
+
+    #[test]
+    fn icon_has_the_asked_size() {
+        assert_eq!(app_icon(ICON_SIZE).unwrap().size(), ICON_SIZE);
     }
 
     #[test]

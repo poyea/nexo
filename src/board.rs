@@ -5,13 +5,13 @@ use std::path::PathBuf;
 
 use chrono::Local;
 use glasskit::widget::{
-    Align, AnyId, Button, Card, Column, Id, Length, Row, Text, TextStyle, kind,
+    Align, AnyId, Button, Card, Column, Id, Insets, Length, Row, Scroll, Text, TextStyle, kind,
 };
 use glasskit::window::Window;
 use nexo_core::{Card as Conversation, Stage};
 
-/// How many cards a lane shows. The window has no scrolling, so the rest is a count.
-const SLOTS: usize = 4;
+/// How many cards a lane shows. A lane scrolls, and the rest after these is a count.
+const SLOTS: usize = 40;
 const MAX_TITLE_CHARS: usize = 32;
 
 /// What the user asked for on the board.
@@ -115,13 +115,25 @@ fn lane(w: &mut Window, stage: Stage) -> (Lane, Id<kind::Column>) {
     let heading = w.add(Text::new("").style(TextStyle::BodyStrong));
     let slots: Vec<Slot> = (0..SLOTS).map(|_| slot(w)).collect();
     let rest = w.add(Text::new("").style(TextStyle::Caption));
+    // Space at the right keeps the cards clear of the scroll bar.
+    let cards = w.add(
+        Scroll::new()
+            .gap(8.0)
+            .padding(Insets {
+                left: 0.0,
+                top: 0.0,
+                right: 10.0,
+                bottom: 0.0,
+            })
+            .children(slots.iter().map(|slot| slot.card))
+            .child(rest),
+    );
     let column = w.add(
         Column::new()
             .width(Length::Fill(1.0))
             .gap(8.0)
             .child(heading)
-            .children(slots.iter().map(|slot| slot.card))
-            .child(rest),
+            .child(cards),
     );
     let lane = Lane {
         stage,
