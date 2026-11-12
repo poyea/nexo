@@ -13,7 +13,9 @@ use glasskit::window::{Window, WindowEvent};
 use nexo_core::Report;
 
 use crate::board::{Board, BoardAction};
+use crate::channels::{Channels, ChannelsAction, GmailState};
 use crate::config::{Config, Interval, Unit};
+use crate::inbox::{Inbox, InboxAction};
 
 const SIDE_WIDTH: f32 = 208.0;
 const ICON_SIZE: u32 = 64;
@@ -27,6 +29,8 @@ pub enum Action {
     ToggleAutostart,
     SetInterval(Interval),
     Board(BoardAction),
+    Inbox(InboxAction),
+    Channels(ChannelsAction),
     Close,
 }
 
@@ -111,6 +115,8 @@ pub struct MainWindow {
     units: [(Id<kind::NavItem>, Unit); 2],
     unit: Unit,
     board: Board,
+    inbox: Inbox,
+    channels: Channels,
 }
 
 impl MainWindow {
@@ -148,14 +154,11 @@ impl MainWindow {
         // Each lane scrolls on its own, so the page does not.
         let board_page = framed(&mut w, "Board", lanes.into());
 
-        let none = w.add(Text::new("No channels yet").style(TextStyle::BodyStrong));
-        let about = w.add(Text::new(
-            "A channel brings the messages of one service into your folder, and sends the \
-             replies that you write there.",
-        ));
-        let lines = w.add(Column::new().gap(8.0).child(none).child(about));
-        let empty = w.add(Card::new().child(lines));
-        let channels = page(&mut w, "Channels", vec![empty.into()]);
+        let (inbox, list) = Inbox::build(&mut w);
+        let inbox_page = framed(&mut w, "Inbox", list.into());
+
+        let (channels, cards) = Channels::build(&mut w);
+        let channels_page = page(&mut w, "Channels", cards);
 
         let folder_title = w.add(Text::new("Output folder"));
         let folder =
@@ -211,6 +214,7 @@ impl MainWindow {
         );
         let items = [
             w.add(NavItem::new("Overview")),
+            w.add(NavItem::new("Inbox")),
             w.add(NavItem::new("Board")),
             w.add(NavItem::new("Channels")),
             w.add(NavItem::new("Settings")),
@@ -224,10 +228,11 @@ impl MainWindow {
                 .child(items[0])
                 .child(items[1])
                 .child(items[2])
+                .child(items[3])
                 .child(gap)
-                .child(items[3]),
+                .child(items[4]),
         );
-        let pages = [overview, board_page, channels, settings];
+        let pages = [overview, inbox_page, board_page, channels_page, settings];
         let stack = w.add(Stack::new().width(Length::Fill(1.0)).children(pages));
         let root = w.add(
             Row::new()
@@ -261,6 +266,8 @@ impl MainWindow {
             units,
             unit: interval.unit,
             board,
+            inbox,
+            channels,
         };
         this.show_unit();
         this.show_tab(0);
@@ -290,6 +297,33 @@ impl MainWindow {
     /// Show these conversations on the board.
     pub fn set_board(&mut self, cards: &[nexo_core::Card]) {
         self.board.set(&mut self.window, cards);
+    }
+
+    /// Tell the inbox which channels have a list of conversations. The action, if there is
+    /// one, loads the first page of a channel that is new.
+    pub fn set_browsable(&mut self, channels: &[String]) -> Option<Action> {
+        self.inbox
+            .set_channels(&mut self.window, channels)
+            .map(Action::Inbox)
+    }
+
+    /// Show a page of conversations in the inbox. `tag` is the tag of its request.
+    pub fn show_listed(&mut self, tag: u64, page: Result<nexo_core::Page, String>) {
+        self.inbox.listed(&mut self.window, tag, page);
+    }
+
+    /// Show a conversation in the reader of the inbox.
+    pub fn show_opened(&mut self, id: &str, conversation: Result<nexo_core::Update, String>) {
+        self.inbox.opened(&mut self.window, id, conversation);
+    }
+
+    /// Show in the inbox that a conversation went to the board, or did not.
+    pub fn show_tracked(&mut self, id: &str, result: &Result<(), String>) {
+        self.inbox.tracked(&mut self.window, id, result);
+    }
+
+    pub fn set_gmail(&mut self, state: &GmailState) {
+        self.channels.set_gmail(&mut self.window, state);
     }
 
     pub fn set_autostart(&mut self, on: bool) {
@@ -322,7 +356,15 @@ impl MainWindow {
                         actions.extend(self.read_interval());
                     } else if let Some(action) = self.board.action(id) {
                         actions.push(Action::Board(action));
+                    } else if let Some(action) = self.inbox.clicked(&mut self.window, id) {
+                        actions.push(Action::Inbox(action));
+                    } else if let Some(action) = self.channels.clicked(&mut self.window, id) {
+                        actions.push(Action::Channels(action));
                     }
+                }
+                WindowEvent::Submitted(id) => {
+                    let action = self.inbox.submitted(&mut self.window, id);
+                    actions.extend(action.map(Action::Inbox));
                 }
                 WindowEvent::Changed(id) if id == self.interval_box => {
                     actions.extend(self.read_interval());

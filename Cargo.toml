@@ -34,10 +34,14 @@ publish = false
 anyhow.workspace = true
 chrono.workspace = true
 glasskit = "0.6"
+keyring-core = "1"
 nexo-core = { path = "crates/core" }
+nexo-gmail = { path = "crates/gmail" }
 serde.workspace = true
+serde_json.workspace = true
 toml = "1"
 toml_edit = "0.25"
+windows-native-keyring-store = "1.1"
 
 [build-dependencies]
 embed-manifest = "1.5"
