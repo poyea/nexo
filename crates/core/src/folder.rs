@@ -96,6 +96,20 @@ impl Folder {
         self.root.join(files::STATE_DIR)
     }
 
+    pub fn has(&self, channel: &str, id: &str) -> bool {
+        self.known
+            .contains_key(&(channel.to_owned(), id.to_owned()))
+    }
+
+    /// The ids of the conversations of a channel.
+    pub fn ids(&self, channel: &str) -> Vec<String> {
+        self.known
+            .keys()
+            .filter(|(c, _)| c == channel)
+            .map(|(_, id)| id.clone())
+            .collect()
+    }
+
     fn scan(&mut self) -> Result<()> {
         for channel in subdirectories(&self.root)? {
             let Some(name) = channel.file_name().and_then(|n| n.to_str()) else {

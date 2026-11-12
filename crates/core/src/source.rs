@@ -3,7 +3,7 @@
 
 use anyhow::{Result, bail};
 
-use crate::model::{Conversation, Message};
+use crate::model::{Conversation, Message, Page};
 
 /// New messages of one conversation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,7 +30,31 @@ pub trait Source: Send {
     fn channel(&self) -> &str;
 
     /// Give the messages after `cursor`, or all messages when `cursor` is `None`.
-    fn fetch(&mut self, cursor: Option<&str>) -> Result<Batch>;
+    ///
+    /// `tracked` has the ids of the conversations that the folder has for this channel. A
+    /// source that the user picks conversations from gives updates only for these. Other
+    /// sources ignore it and give all conversations.
+    fn fetch(&mut self, cursor: Option<&str>, tracked: &[String]) -> Result<Batch>;
+
+    /// The user can look through the conversations of the channel, and pick the ones that
+    /// the folder keeps. Such a source has [`Source::browse`] and [`Source::load`].
+    fn can_browse(&self) -> bool {
+        false
+    }
+
+    /// Give one page of the conversations that match `query`, the newest first. An empty
+    /// query is for the default list of the channel. `page` is [`Page::next`] of the page
+    /// before, or `None` for the first page. The words of a query are those of the channel.
+    fn browse(&mut self, query: &str, page: Option<&str>) -> Result<Page> {
+        let _ = (query, page);
+        bail!("{} has no list of conversations", self.channel())
+    }
+
+    /// Give the conversation `id` with all its messages.
+    fn load(&mut self, id: &str) -> Result<Update> {
+        let _ = id;
+        bail!("{} cannot load one conversation", self.channel())
+    }
 
     fn can_reply(&self) -> bool {
         false
