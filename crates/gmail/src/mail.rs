@@ -74,7 +74,23 @@ impl Mail {
         self.label_ids.iter().any(|l| l == label)
     }
 
-    fn sent_at(&self) -> Option<DateTime<Utc>> {
+    pub fn subject(&self) -> String {
+        decode_words(self.header("Subject").unwrap_or_default())
+            .trim()
+            .to_owned()
+    }
+
+    /// The name of the sender, or the address if the sender gave no name.
+    pub fn sender_name(&self) -> String {
+        self.author()
+    }
+
+    /// The text of the mail. See [`body_text`].
+    pub fn text(&self) -> String {
+        body_text(&self.payload)
+    }
+
+    pub fn sent_at(&self) -> Option<DateTime<Utc>> {
         DateTime::from_timestamp_millis(self.internal_date.parse().ok()?)
     }
 

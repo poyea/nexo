@@ -255,7 +255,7 @@ fn changed_threads(gmail: &Session, cursor: &str) -> Result<Option<(BTreeSet<Str
 
 /// Do `work` for each item on some threads at the same time, and give the results in the
 /// order of the items.
-fn in_parallel<I: Sync, T: Send>(
+pub(crate) fn in_parallel<I: Sync, T: Send>(
     items: &[I],
     work: impl Fn(&I) -> Result<T> + Sync,
 ) -> Result<Vec<T>> {

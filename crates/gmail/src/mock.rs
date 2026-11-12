@@ -302,6 +302,43 @@ fn route(
             }
             (200, answer)
         }
+        ("GET", "messages") => {
+            let q = param("q").unwrap_or_default();
+            let after: i64 = q
+                .split("after:")
+                .nth(1)
+                .and_then(|rest| rest.split_whitespace().next()?.parse().ok())
+                .unwrap_or(0);
+            let messages: Vec<Value> = mailbox
+                .threads
+                .iter()
+                .flat_map(|thread| thread["messages"].as_array().unwrap())
+                .filter(|mail| {
+                    let from = mail["payload"]["headers"][0]["value"]
+                        .as_str()
+                        .unwrap_or("");
+                    let time: i64 = mail["internalDate"]
+                        .as_str()
+                        .and_then(|t| t.parse().ok())
+                        .unwrap_or(0);
+                    from.contains("linkedin.com") && time >= after * 1000
+                })
+                .map(|mail| json!({"id": mail["id"]}))
+                .collect();
+            (200, json!({"messages": messages}))
+        }
+        ("GET", path) if path.starts_with("messages/") => {
+            let id = path.strip_prefix("messages/").unwrap_or_default();
+            let found = mailbox
+                .threads
+                .iter()
+                .flat_map(|thread| thread["messages"].as_array().unwrap())
+                .find(|mail| mail["id"] == id);
+            match found {
+                Some(mail) => (200, mail.clone()),
+                None => failure(404, "Requested entity was not found."),
+            }
+        }
         ("GET", "history") => {
             let start: u64 = param("startHistoryId")
                 .and_then(|n| n.parse().ok())
