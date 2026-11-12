@@ -75,6 +75,7 @@ pub struct Inbox {
     status: Id<kind::Text>,
     list: Id<kind::Scroll>,
     slots: Vec<Slot>,
+    turn: Id<kind::Row>,
     newer: Id<kind::Button>,
     older: Id<kind::Button>,
     reader: Id<kind::Column>,
@@ -168,6 +169,7 @@ impl Inbox {
             status,
             list,
             slots,
+            turn,
             newer,
             older,
             reader,
@@ -373,6 +375,7 @@ impl Inbox {
                 w.set_enabled(slot.add, !item.tracked && !adding);
             }
         }
+        w.set_visible(self.turn, !self.items.is_empty() || self.index > 0);
         w.set_enabled(self.newer, !self.loading && self.index > 0);
         w.set_enabled(self.older, !self.loading && self.next.is_some());
 

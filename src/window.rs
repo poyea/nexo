@@ -20,8 +20,7 @@ use crate::inbox::{Inbox, InboxAction};
 const SIDE_WIDTH: f32 = 208.0;
 const ICON_SIZE: u32 = 64;
 const INTERVAL_HINT: &str = "Type a number from 1, and pick seconds or minutes.";
-const LOOK_HINT: &str = "Glass shows the blurred desktop behind the window. Mica takes a light \
-    tint of the desktop picture. Solid is one color.";
+const LOOK_HINT: &str = "How much of the desktop shows through the window.";
 
 /// What the user asked for in the window.
 #[derive(Debug, Clone, PartialEq, Eq)]
