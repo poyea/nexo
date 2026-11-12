@@ -114,6 +114,7 @@ impl Interval {
     pub fn describe(self) -> String {
         match (self.every, self.unit) {
             (1, Unit::Minutes) => "Sync every minute".into(),
+            (1, Unit::Seconds) => "Sync every second".into(),
             (n, unit) => format!("Sync every {n} {}", unit.name()),
         }
     }
@@ -290,6 +291,7 @@ mod tests {
     #[test]
     fn describe_says_the_number_and_the_unit() {
         assert_eq!(interval(1, Unit::Minutes).describe(), "Sync every minute");
+        assert_eq!(interval(1, Unit::Seconds).describe(), "Sync every second");
         assert_eq!(
             interval(5, Unit::Minutes).describe(),
             "Sync every 5 minutes"
