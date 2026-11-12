@@ -1,0 +1,22 @@
+[package]
+name = "nexo-gmail"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "The Gmail channel of nexo."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+base64 = "0.23"
+chrono.workspace = true
+getrandom = "0.4"
+nexo-core = { path = "../core" }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.11"
+ureq = { version = "3.5", features = ["json"] }
