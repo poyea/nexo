@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
+use glasskit::window::Material;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +36,49 @@ impl Unit {
         match self {
             Unit::Seconds => 86_400,
             Unit::Minutes => 1_440,
+        }
+    }
+}
+
+/// The background of the window: how much of the desktop shows through it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Look {
+    /// A light tint of the desktop picture.
+    #[default]
+    Mica,
+    /// The blurred desktop behind the window.
+    Glass,
+    /// One opaque color.
+    Solid,
+}
+
+impl Look {
+    pub const ALL: [Look; 3] = [Look::Mica, Look::Glass, Look::Solid];
+
+    /// The name in the config file.
+    fn name(self) -> &'static str {
+        match self {
+            Look::Mica => "mica",
+            Look::Glass => "glass",
+            Look::Solid => "solid",
+        }
+    }
+
+    /// The name that the user sees.
+    pub fn label(self) -> &'static str {
+        match self {
+            Look::Mica => "Mica",
+            Look::Glass => "Glass",
+            Look::Solid => "Solid",
+        }
+    }
+
+    pub fn material(self) -> Material {
+        match self {
+            Look::Mica => Material::Mica,
+            Look::Glass => Material::Glass,
+            Look::Solid => Material::Solid,
         }
     }
 }
@@ -84,6 +128,8 @@ pub struct Config {
     sync_every: u64,
     #[serde(default = "default_sync_unit")]
     sync_unit: Unit,
+    #[serde(default)]
+    pub look: Look,
 }
 
 fn default_sync_every() -> u64 {
@@ -108,6 +154,7 @@ impl Config {
             output: PathBuf::from(home).join("nexo"),
             sync_every: default_sync_every(),
             sync_unit: default_sync_unit(),
+            look: Look::default(),
         })
     }
 
@@ -128,21 +175,41 @@ impl Config {
 
     /// Change the interval here and in the file. The rest of the file stays as it is.
     pub fn save_interval(&mut self, path: &Path, interval: Interval) -> Result<()> {
-        let text =
-            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        nexo_core::write_atomically(path, with_interval(&text, interval)?)
-            .with_context(|| format!("saving {}", path.display()))?;
+        let every =
+            i64::try_from(interval.every).map_err(|_| anyhow!("the interval is too long"))?;
+        save_values(
+            path,
+            &[
+                ("sync_every", toml_edit::value(every)),
+                ("sync_unit", toml_edit::value(interval.unit.name())),
+            ],
+        )?;
         self.sync_every = interval.every;
         self.sync_unit = interval.unit;
         Ok(())
     }
+
+    /// Change the look here and in the file. The rest of the file stays as it is.
+    pub fn save_look(&mut self, path: &Path, look: Look) -> Result<()> {
+        save_values(path, &[("look", toml_edit::value(look.name()))])?;
+        self.look = look;
+        Ok(())
+    }
 }
 
-fn with_interval(text: &str, interval: Interval) -> Result<String> {
+/// Change these values in the file. The rest of the file stays as it is.
+fn save_values(path: &Path, values: &[(&str, toml_edit::Item)]) -> Result<()> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    nexo_core::write_atomically(path, with_values(&text, values)?)
+        .with_context(|| format!("saving {}", path.display()))
+}
+
+fn with_values(text: &str, values: &[(&str, toml_edit::Item)]) -> Result<String> {
     let mut doc: toml_edit::DocumentMut = text.parse().context("reading the config")?;
-    let every = i64::try_from(interval.every).map_err(|_| anyhow!("the interval is too long"))?;
-    doc["sync_every"] = toml_edit::value(every);
-    doc["sync_unit"] = toml_edit::value(interval.unit.name());
+    for (key, value) in values {
+        doc[key] = value.clone();
+    }
     Ok(doc.to_string())
 }
 
@@ -261,12 +328,27 @@ mod tests {
     #[test]
     fn a_new_interval_keeps_the_rest_of_the_file() {
         let text = "# My folder\noutput = 'C:\\nexo'\nsync_every = 5\n";
-        let saved = with_interval(text, interval(30, Unit::Seconds)).unwrap();
+        let values = [
+            ("sync_every", toml_edit::value(30)),
+            ("sync_unit", toml_edit::value("seconds")),
+        ];
+        let saved = with_values(text, &values).unwrap();
         assert_eq!(
             saved,
             "# My folder\noutput = 'C:\\nexo'\nsync_every = 30\nsync_unit = \"seconds\"\n"
         );
         let config: Config = toml::from_str(&saved).unwrap();
         assert_eq!(config.interval(), interval(30, Unit::Seconds));
+    }
+
+    #[test]
+    fn the_look_is_mica_unless_the_file_says_more() {
+        let config: Config = toml::from_str(OUTPUT).unwrap();
+        assert_eq!(config.look, Look::Mica);
+        for look in Look::ALL {
+            let saved = with_values(OUTPUT, &[("look", toml_edit::value(look.name()))]).unwrap();
+            assert_eq!(toml::from_str::<Config>(&saved).unwrap().look, look);
+        }
+        assert!(toml::from_str::<Config>(&format!("{OUTPUT}look = \"clear\"")).is_err());
     }
 }

@@ -181,6 +181,11 @@ fn run_window(
                             }
                         }
                         Action::SetInterval(_) => {}
+                        Action::SetLook(look) => {
+                            if let Err(err) = config.save_look(config_path, look) {
+                                glasskit::show_error(APP_NAME, &format!("{err:#}"));
+                            }
+                        }
                         Action::Board(BoardAction::Open(dir)) => open_folder(&dir),
                         Action::Channels(ChannelsAction::ConnectGmail(app)) => {
                             let waker = events.waker();

@@ -14,12 +14,14 @@ use nexo_core::Report;
 
 use crate::board::{Board, BoardAction};
 use crate::channels::{Channels, ChannelsAction, GmailState};
-use crate::config::{Config, Interval, Unit};
+use crate::config::{Config, Interval, Look, Unit};
 use crate::inbox::{Inbox, InboxAction};
 
 const SIDE_WIDTH: f32 = 208.0;
 const ICON_SIZE: u32 = 64;
 const INTERVAL_HINT: &str = "Type a number from 1, and pick seconds or minutes.";
+const LOOK_HINT: &str = "Glass shows the blurred desktop behind the window. Mica takes a light \
+    tint of the desktop picture. Solid is one color.";
 
 /// What the user asked for in the window.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +30,7 @@ pub enum Action {
     OpenFolder,
     ToggleAutostart,
     SetInterval(Interval),
+    SetLook(Look),
     Board(BoardAction),
     Inbox(InboxAction),
     Channels(ChannelsAction),
@@ -114,6 +117,8 @@ pub struct MainWindow {
     interval_box: Id<kind::TextBox>,
     units: [(Id<kind::NavItem>, Unit); 2],
     unit: Unit,
+    looks: [(Id<kind::NavItem>, Look); 3],
+    look: Look,
     board: Board,
     inbox: Inbox,
     channels: Channels,
@@ -180,6 +185,16 @@ impl MainWindow {
             interval_note,
             &[interval_box.into(), units[0].0.into(), units[1].0.into()],
         );
+        let look_title = w.add(Text::new("Window background"));
+        let look_note = w.add(Text::new(LOOK_HINT).style(TextStyle::Caption));
+        let looks = Look::ALL.map(|look| (w.add(NavItem::new(look.label())), look));
+        let look = setting(
+            &mut w,
+            look_title,
+            look_note,
+            &looks.map(|(item, _)| item.into()),
+        );
+        w.set_material(config.look.material());
         let autostart_title = w.add(Text::new("Start with Windows"));
         let autostart_state = w.add(Text::new("").style(TextStyle::Caption));
         let autostart_button = w.add(Button::new(""));
@@ -198,7 +213,13 @@ impl MainWindow {
         let settings = page(
             &mut w,
             "Settings",
-            vec![folder.into(), schedule.into(), startup.into(), how.into()],
+            vec![
+                folder.into(),
+                schedule.into(),
+                look.into(),
+                startup.into(),
+                how.into(),
+            ],
         );
 
         let brand = w.add(Text::new("nexo").style(TextStyle::Subtitle));
@@ -265,11 +286,14 @@ impl MainWindow {
             interval_box,
             units,
             unit: interval.unit,
+            looks,
+            look: config.look,
             board,
             inbox,
             channels,
         };
         this.show_unit();
+        this.show_look();
         this.show_tab(0);
         this.set_autostart(autostart);
         this.window.set_icon(&app_icon(ICON_SIZE)?)?;
@@ -354,6 +378,10 @@ impl MainWindow {
                         self.unit = unit;
                         self.show_unit();
                         actions.extend(self.read_interval());
+                    } else if let Some(&(_, look)) = self.looks.iter().find(|(l, _)| id == *l) {
+                        self.look = look;
+                        self.show_look();
+                        actions.push(Action::SetLook(look));
                     } else if let Some(action) = self.board.action(id) {
                         actions.push(Action::Board(action));
                     } else if let Some(action) = self.inbox.clicked(&mut self.window, id) {
@@ -380,6 +408,13 @@ impl MainWindow {
         for (item, unit) in self.units {
             self.window.set_selected(item, unit == self.unit);
         }
+    }
+
+    fn show_look(&mut self) {
+        for (item, look) in self.looks {
+            self.window.set_selected(item, look == self.look);
+        }
+        self.window.set_material(self.look.material());
     }
 
     /// The interval in the text box, if it is valid. If not, the card says why.
