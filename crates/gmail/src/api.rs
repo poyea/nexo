@@ -12,6 +12,11 @@ use ureq::Agent;
 const TIMEOUT: Duration = Duration::from_secs(30);
 /// Get a new access token this long before the end of the old one.
 const MARGIN: Duration = Duration::from_secs(60);
+/// How long to wait before each new try of a read that Gmail was too busy for.
+#[cfg(not(test))]
+const RETRY_AFTER: [Duration; 2] = [Duration::from_millis(500), Duration::from_secs(2)];
+#[cfg(test)]
+const RETRY_AFTER: [Duration; 2] = [Duration::from_millis(5), Duration::from_millis(10)];
 
 /// The addresses of the Google services. A test gives the addresses of a local server.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,13 +156,27 @@ impl Session {
 
     pub fn get<T: DeserializeOwned>(&self, path: &str, query: &[(&str, &str)]) -> Result<T> {
         let url = format!("{}/{path}", self.api);
-        let response = self
-            .agent
-            .get(&url)
-            .header("Authorization", &self.bearer)
-            .query_pairs(query.iter().copied())
-            .call();
-        read(response, &url)
+        let get = || {
+            let response = self
+                .agent
+                .get(&url)
+                .header("Authorization", &self.bearer)
+                .query_pairs(query.iter().copied())
+                .call();
+            read(response, &url)
+        };
+        // A read is safe to do again. Gmail gives 429 for too many requests in a short time.
+        let mut result = get();
+        for wait in RETRY_AFTER {
+            match &result {
+                Err(err) if matches!(status_of(err), Some(429 | 500..=599)) => {
+                    std::thread::sleep(wait);
+                    result = get();
+                }
+                _ => break,
+            }
+        }
+        result
     }
 
     pub fn post<T: DeserializeOwned>(&self, path: &str, body: &impl Serialize) -> Result<T> {

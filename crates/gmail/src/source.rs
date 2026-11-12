@@ -502,6 +502,19 @@ mod tests {
     }
 
     #[test]
+    fn a_read_goes_again_when_gmail_is_too_busy() {
+        let server = mailbox(2);
+        let mut gmail = gmail(&server);
+        gmail.browse("", None).unwrap();
+        server.mailbox.lock().unwrap().busy = 2;
+        assert_eq!(gmail.browse("", None).unwrap().items.len(), 2);
+
+        server.mailbox.lock().unwrap().busy = 3;
+        let err = gmail.load("t1").unwrap_err();
+        assert!(format!("{err:#}").contains("Too many requests"), "{err:#}");
+    }
+
+    #[test]
     fn an_ended_sign_in_tells_the_user_what_to_do() {
         let server = mailbox(1);
         let mut credentials = server.credentials();

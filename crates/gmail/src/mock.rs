@@ -106,6 +106,8 @@ pub struct Mailbox {
     access_token: String,
     /// The paths of all requests, with their queries.
     pub requests: Vec<String>,
+    /// How many of the next requests get the answer that Gmail is too busy.
+    pub busy: usize,
 }
 
 impl Mailbox {
@@ -250,6 +252,10 @@ fn route(
         || authorization != format!("Bearer {}", mailbox.access_token)
     {
         return failure(401, "Invalid Credentials");
+    }
+    if mailbox.busy > 0 {
+        mailbox.busy -= 1;
+        return failure(429, "Too many requests");
     }
     let path = path.strip_prefix("/gmail/").unwrap_or(path);
     match (method, path) {
