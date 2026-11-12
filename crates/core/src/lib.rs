@@ -17,6 +17,7 @@ mod folder;
 mod fsutil;
 mod model;
 mod source;
+mod text;
 
 pub use board::{Card, Stage};
 pub use engine::{Engine, Report};
@@ -24,3 +25,4 @@ pub use folder::{Folder, PendingReply, files};
 pub use fsutil::write_atomically;
 pub use model::{Conversation, Direction, Message, PAGE_ITEMS, Page, Summary};
 pub use source::{Batch, Source, Update};
+pub use text::{decode_entities, html_to_text};

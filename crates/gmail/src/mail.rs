@@ -3,13 +3,10 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use nexo_core::{Conversation, Direction, Message, Summary, Update};
+use nexo_core::{Conversation, Direction, Message, Summary, Update, decode_entities, html_to_text};
 use serde::Deserialize;
 
-use crate::text::{
-    base64_lines, base64url, decode_entities, decode_words, encode_words, from_base64url,
-    html_to_text,
-};
+use crate::text::{base64_lines, base64url, decode_words, encode_words, from_base64url};
 
 const NO_SUBJECT: &str = "(no subject)";
 
