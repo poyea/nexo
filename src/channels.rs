@@ -22,6 +22,8 @@ pub enum ChannelsAction {
     DisconnectGmail,
     /// Show the page of Google Cloud where the user makes the OAuth client.
     OpenGoogleCloud,
+    /// Turn the LinkedIn channel on or off.
+    SetLinkedIn(bool),
 }
 
 /// Where the Gmail channel is.
@@ -46,6 +48,9 @@ pub struct Channels {
     cancel: Id<kind::Button>,
     console: Id<kind::Button>,
     disconnect: Id<kind::Button>,
+    linkedin_state: Id<kind::Text>,
+    linkedin_switch: Id<kind::Button>,
+    linkedin_on: bool,
 }
 
 impl Channels {
@@ -97,6 +102,19 @@ impl Channels {
         let parts = w.add(Column::new().gap(12.0).child(head).child(setup));
         let gmail = w.add(Card::new().child(parts));
 
+        let title = w.add(Text::new("LinkedIn").style(TextStyle::BodyStrong));
+        let linkedin_state = w.add(Text::new("").style(TextStyle::Caption));
+        let lines = w.add(
+            Column::new()
+                .width(Length::Fill(1.0))
+                .gap(4.0)
+                .child(title)
+                .child(linkedin_state),
+        );
+        let linkedin_switch = w.add(Button::new(""));
+        let row = w.add(Row::new().gap(8.0).child(lines).child(linkedin_switch));
+        let linkedin = w.add(Card::new().child(row));
+
         let about = w.add(
             Text::new(
                 "A channel brings the messages of one service into nexo. You pick the \
@@ -113,9 +131,13 @@ impl Channels {
             cancel,
             console,
             disconnect,
+            linkedin_state,
+            linkedin_switch,
+            linkedin_on: false,
         };
         channels.set_gmail(w, &GmailState::Off);
-        (channels, vec![gmail.into(), about.into()])
+        channels.set_linkedin(w, false, false);
+        (channels, vec![gmail.into(), linkedin.into(), about.into()])
     }
 
     pub fn set_gmail(&mut self, w: &mut Window, state: &GmailState) {
@@ -140,6 +162,17 @@ impl Channels {
         }
     }
 
+    /// Show if the LinkedIn channel is on, and if the Gmail that it reads is connected.
+    pub fn set_linkedin(&mut self, w: &mut Window, on: bool, gmail: bool) {
+        self.linkedin_on = on;
+        w.set_text(self.linkedin_state, linkedin_words(on, gmail));
+        w.set_text(
+            self.linkedin_switch,
+            if on { "Turn off" } else { "Turn on" },
+        );
+        w.set_enabled(self.linkedin_switch, on || gmail);
+    }
+
     /// What a click on this widget asks for, if the widget is part of the page.
     pub fn clicked(&mut self, w: &mut Window, clicked: AnyId) -> Option<ChannelsAction> {
         if clicked == self.connect {
@@ -156,10 +189,39 @@ impl Channels {
             Some(ChannelsAction::CancelGmail)
         } else if clicked == self.disconnect {
             Some(ChannelsAction::DisconnectGmail)
+        } else if clicked == self.linkedin_switch {
+            Some(ChannelsAction::SetLinkedIn(!self.linkedin_on))
         } else if clicked == self.console {
             Some(ChannelsAction::OpenGoogleCloud)
         } else {
             None
         }
+    }
+}
+
+fn linkedin_words(on: bool, gmail: bool) -> &'static str {
+    match (on, gmail) {
+        (true, true) => {
+            "On. The LinkedIn messages that Gmail got a notification email for come to the \
+             board. To reply, open LinkedIn."
+        }
+        (true, false) => "On, but it needs Gmail: connect Gmail to get LinkedIn messages.",
+        (false, true) => {
+            "Off. nexo can read the notification emails that LinkedIn sends to your Gmail."
+        }
+        (false, false) => "Off. It needs Gmail: nexo reads the emails that LinkedIn sends you.",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_linkedin_card_tells_what_it_needs() {
+        assert!(linkedin_words(true, true).starts_with("On."));
+        assert!(linkedin_words(true, false).contains("connect Gmail"));
+        assert!(linkedin_words(false, true).starts_with("Off."));
+        assert!(linkedin_words(false, false).contains("needs Gmail"));
     }
 }

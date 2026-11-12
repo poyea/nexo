@@ -349,6 +349,10 @@ impl MainWindow {
         self.channels.set_gmail(&mut self.window, state);
     }
 
+    pub fn set_linkedin(&mut self, on: bool, gmail: bool) {
+        self.channels.set_linkedin(&mut self.window, on, gmail);
+    }
+
     pub fn set_autostart(&mut self, on: bool) {
         let (state, label) = if on {
             ("On", "Turn off")

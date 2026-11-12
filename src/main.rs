@@ -3,6 +3,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod accounts;
 mod board;
 mod channels;
 mod config;
@@ -18,19 +19,16 @@ use std::time::SystemTime;
 use anyhow::{Context, Result, bail};
 use glasskit::events::{Event, EventLoop};
 use nexo_core::{Engine, Folder};
-use nexo_gmail::{Credentials, Gmail};
 
+use accounts::{Accounts, Context as Cx};
 use board::BoardAction;
-use channels::{ChannelsAction, GmailState};
 use config::Config;
 use inbox::InboxAction;
-use signin::{SignIn, SignedIn};
 use window::{Action, MainWindow, View};
 use worker::{Outcome, Worker};
 
 const APP_NAME: &str = "nexo";
 const CONFIG_FILE: &str = "config.toml";
-const GOOGLE_CLOUD: &str = "https://console.cloud.google.com/apis/credentials";
 
 const USAGE: &str = "\
 Usage: nexo [--once]
@@ -67,10 +65,9 @@ fn run() -> Result<()> {
     let config = config::load_or_create(&config_path)?;
     let mut engine = Engine::new(Folder::open(&config.output)?)?;
     eprintln!("output folder: {}", config.output.display());
-    vault::open()?;
-    let gmail: Option<Credentials> = vault::load(nexo_gmail::CHANNEL)?;
-    if let Some(credentials) = &gmail {
-        engine.add(Box::new(Gmail::new(credentials.clone())))?;
+    let accounts = Accounts::load()?;
+    for source in accounts.sources(&config) {
+        engine.add(source)?;
     }
 
     if once {
@@ -81,15 +78,14 @@ fn run() -> Result<()> {
         }
         return Ok(());
     }
-    let gmail = gmail.map_or(GmailState::Off, |c| GmailState::On(c.email));
-    run_window(engine, config, &config_path, gmail)
+    run_window(engine, config, &config_path, accounts)
 }
 
 fn run_window(
     engine: Engine,
     mut config: Config,
     config_path: &Path,
-    gmail: GmailState,
+    mut accounts: Accounts,
 ) -> Result<()> {
     let ui = glasskit::Ui::new()?;
     let mut events: EventLoop<()> = EventLoop::new(&ui)?;
@@ -98,11 +94,10 @@ fn run_window(
     let mut worker = Worker::spawn(engine, move || waker.wake())?;
     let mut autostart = glasskit::autostart::is_enabled(APP_NAME);
     let mut window = MainWindow::new(&ui, &config, autostart)?;
-    window.set_gmail(&gmail);
+    accounts.show(&mut window, &config);
     if let Some(action) = window.set_browsable(&browsable) {
         act(action, &mut worker)?;
     }
-    let mut sign_in: Option<SignIn> = None;
     let mut view = View::default();
     let mut shown = None;
     let mut board = None;
@@ -111,24 +106,14 @@ fn run_window(
         if !worker.is_syncing() && SystemTime::now() >= next_sync {
             worker.sync()?;
         }
-        if let Some(ended) = sign_in.as_ref().and_then(SignIn::poll) {
-            sign_in = None;
-            let state = match ended {
-                SignedIn::Yes(credentials) => {
-                    match vault::save(nexo_gmail::CHANNEL, &credentials) {
-                        Ok(()) => {
-                            let email = credentials.email.clone();
-                            worker.connect(Box::new(Gmail::new(credentials)))?;
-                            next_sync = SystemTime::now();
-                            GmailState::On(email)
-                        }
-                        Err(err) => GmailState::Failed(format!("{err:#}")),
-                    }
-                }
-                SignedIn::Stopped => GmailState::Off,
-                SignedIn::Failed(why) => GmailState::Failed(why),
-            };
-            window.set_gmail(&state);
+        let cx = Cx {
+            worker: &mut worker,
+            window: &mut window,
+            config: &mut config,
+            config_path,
+        };
+        if accounts.poll(cx)? {
+            next_sync = SystemTime::now();
         }
         while let Some(update) = worker.poll()? {
             match update.outcome {
@@ -187,36 +172,14 @@ fn run_window(
                             }
                         }
                         Action::Board(BoardAction::Open(dir)) => open_folder(&dir),
-                        Action::Channels(ChannelsAction::ConnectGmail(app)) => {
-                            let waker = events.waker();
-                            let state = match SignIn::start(app, move || waker.wake()) {
-                                Ok(started) => {
-                                    sign_in = Some(started);
-                                    GmailState::Waiting
-                                }
-                                Err(err) => GmailState::Failed(format!("{err:#}")),
+                        Action::Channels(action) => {
+                            let cx = Cx {
+                                worker: &mut worker,
+                                window: &mut window,
+                                config: &mut config,
+                                config_path,
                             };
-                            window.set_gmail(&state);
-                        }
-                        Action::Channels(ChannelsAction::CancelGmail) => {
-                            if let Some(waiting) = &sign_in {
-                                waiting.cancel();
-                            }
-                        }
-                        Action::Channels(ChannelsAction::DisconnectGmail) => {
-                            let state = match vault::remove(nexo_gmail::CHANNEL) {
-                                Ok(()) => {
-                                    worker.disconnect(nexo_gmail::CHANNEL.to_owned())?;
-                                    GmailState::Off
-                                }
-                                Err(err) => GmailState::Failed(format!("{err:#}")),
-                            };
-                            window.set_gmail(&state);
-                        }
-                        Action::Channels(ChannelsAction::OpenGoogleCloud) => {
-                            if let Err(err) = signin::open_url(GOOGLE_CLOUD) {
-                                glasskit::show_error(APP_NAME, &format!("{err:#}"));
-                            }
+                            accounts.act(action, events.waker(), cx)?;
                         }
                         action
                         @ (Action::Board(BoardAction::SetDone { .. }) | Action::Inbox(_)) => {

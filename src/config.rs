@@ -131,6 +131,9 @@ pub struct Config {
     sync_unit: Unit,
     #[serde(default)]
     pub look: Look,
+    /// Read the notification emails of LinkedIn in the Gmail of the user.
+    #[serde(default)]
+    pub linkedin: bool,
 }
 
 fn default_sync_every() -> u64 {
@@ -156,6 +159,7 @@ impl Config {
             sync_every: default_sync_every(),
             sync_unit: default_sync_unit(),
             look: Look::default(),
+            linkedin: false,
         })
     }
 
@@ -187,6 +191,13 @@ impl Config {
         )?;
         self.sync_every = interval.every;
         self.sync_unit = interval.unit;
+        Ok(())
+    }
+
+    /// Turn the LinkedIn channel on or off here and in the file.
+    pub fn save_linkedin(&mut self, path: &Path, on: bool) -> Result<()> {
+        save_values(path, &[("linkedin", toml_edit::value(on))])?;
+        self.linkedin = on;
         Ok(())
     }
 
