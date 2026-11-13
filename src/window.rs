@@ -455,7 +455,14 @@ impl MainWindow {
 
 /// A page: a title, then its parts from the top. The parts scroll if the window is short.
 fn page(w: &mut Window, title: &str, parts: Vec<AnyId>) -> Id<kind::Column> {
-    let body = w.add(Scroll::new().gap(12.0).children(parts));
+    // Space at the right keeps the parts clear of the scroll bar.
+    let clear = Insets {
+        left: 0.0,
+        top: 0.0,
+        right: 10.0,
+        bottom: 0.0,
+    };
+    let body = w.add(Scroll::new().gap(12.0).padding(clear).children(parts));
     framed(w, title, body.into())
 }
 
