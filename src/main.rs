@@ -61,16 +61,20 @@ fn run() -> Result<()> {
         bail!("nexo is already running.");
     };
 
-    let config_path = app_dir()?.join(CONFIG_FILE);
+    let app_dir = app_dir()?;
+    let config_path = app_dir.join(CONFIG_FILE);
     let config = config::load_or_create(&config_path)?;
     let mut engine = Engine::new(Folder::open(&config.output)?)?;
     eprintln!("output folder: {}", config.output.display());
-    let accounts = Accounts::load()?;
+    let accounts = Accounts::load(&app_dir)?;
     for source in accounts.sources(&config) {
         engine.add(source)?;
     }
 
     if once {
+        if let Some(telegram) = accounts.telegram_now()? {
+            engine.add(Box::new(telegram))?;
+        }
         let report = engine.sync();
         println!("{}", window::summary(&report, &now_hhmm()));
         for problem in &report.problems {
@@ -94,6 +98,7 @@ fn run_window(
     let mut worker = Worker::spawn(engine, move || waker.wake())?;
     let mut autostart = glasskit::autostart::is_enabled(APP_NAME);
     let mut window = MainWindow::new(&ui, &config, autostart)?;
+    accounts.start(events.waker());
     accounts.show(&mut window, &config);
     if let Some(action) = window.set_browsable(&browsable) {
         act(action, &mut worker)?;

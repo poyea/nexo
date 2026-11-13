@@ -1342,6 +1342,7 @@ dependencies = [
  "nexo-core",
  "nexo-gmail",
  "nexo-mail",
+ "nexo-telegram",
  "serde",
  "serde_json",
  "toml",

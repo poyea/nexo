@@ -38,6 +38,7 @@ keyring-core = "1"
 nexo-core = { path = "crates/core" }
 nexo-gmail = { path = "crates/gmail" }
 nexo-mail = { path = "crates/mail" }
+nexo-telegram = { path = "crates/telegram" }
 serde.workspace = true
 serde_json.workspace = true
 toml = "1"

@@ -13,7 +13,7 @@ use glasskit::window::{Window, WindowEvent};
 use nexo_core::Report;
 
 use crate::board::{Board, BoardAction};
-use crate::channels::{Channels, ChannelsAction, EmailState, GmailState};
+use crate::channels::{Channels, ChannelsAction, EmailState, GmailState, TelegramState};
 use crate::config::{Config, Interval, Look, Unit};
 use crate::inbox::{Inbox, InboxAction};
 
@@ -357,6 +357,10 @@ impl MainWindow {
         self.channels.set_email(&mut self.window, state);
     }
 
+    pub fn set_telegram(&mut self, state: &TelegramState) {
+        self.channels.set_telegram(&mut self.window, state);
+    }
+
     pub fn set_autostart(&mut self, on: bool) {
         let (state, label) = if on {
             ("On", "Turn off")
@@ -400,6 +404,8 @@ impl MainWindow {
                 WindowEvent::Submitted(id) => {
                     let action = self.inbox.submitted(&mut self.window, id);
                     actions.extend(action.map(Action::Inbox));
+                    let action = self.channels.submitted(&mut self.window, id);
+                    actions.extend(action.map(Action::Channels));
                 }
                 WindowEvent::Changed(id) if id == self.interval_box => {
                     actions.extend(self.read_interval());
