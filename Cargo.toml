@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core", "crates/gmail", "crates/mail"]
+members = ["crates/core", "crates/gmail", "crates/mail", "crates/telegram"]
 
 [workspace.package]
 version = "0.1.0"
