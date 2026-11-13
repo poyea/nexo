@@ -3,12 +3,14 @@
 
 use chrono::{DateTime, Local, Utc};
 use glasskit::widget::{
-    AnyId, Button, Card, Column, Id, Insets, Length, Row, Scroll, Stack, Text, TextBox, TextStyle,
-    kind,
+    AnyId, Button, Card, Column, Id, Insets, Length, NavItem, Row, Scroll, Stack, Text, TextBox,
+    TextStyle, kind,
 };
 use glasskit::window::Window;
 use nexo_core::{Direction, PAGE_ITEMS, Page, Summary, Update};
 
+/// The most channels that the inbox has a tab for.
+const MAX_TABS: usize = 6;
 const MAX_TITLE_CHARS: usize = 80;
 const MAX_PREVIEW_CHARS: usize = 140;
 /// The most characters of a conversation that the reader shows.
@@ -52,6 +54,9 @@ struct Reading {
 /// The inbox: the conversations of a channel, page by page, to read and to put on the
 /// board.
 pub struct Inbox {
+    /// The channels that have a list of conversations.
+    channels: Vec<String>,
+    /// The channel that the list shows.
     channel: Option<String>,
     /// The search that the list shows.
     query: String,
@@ -70,6 +75,8 @@ pub struct Inbox {
     adding: Vec<String>,
     reading: Option<Reading>,
 
+    tab_row: Id<kind::Row>,
+    tabs: Vec<Id<kind::NavItem>>,
     search: Id<kind::TextBox>,
     go: Id<kind::Button>,
     status: Id<kind::Text>,
@@ -88,6 +95,8 @@ pub struct Inbox {
 impl Inbox {
     /// Make the widgets, and give the column that holds them.
     pub fn build(w: &mut Window) -> (Self, Id<kind::Column>) {
+        let tabs: Vec<Id<kind::NavItem>> = (0..MAX_TABS).map(|_| w.add(NavItem::new(""))).collect();
+        let tab_row = w.add(Row::new().gap(4.0).children(tabs.iter().copied()));
         let search = w.add(
             TextBox::new()
                 .placeholder("Search")
@@ -149,11 +158,13 @@ impl Inbox {
             Column::new()
                 .gap(8.0)
                 .height(Length::Fill(1.0))
+                .child(tab_row)
                 .child(bar)
                 .child(status)
                 .child(views),
         );
         let mut inbox = Self {
+            channels: Vec::new(),
             channel: None,
             query: String::new(),
             pages: vec![None],
@@ -164,6 +175,8 @@ impl Inbox {
             loading: false,
             adding: Vec::new(),
             reading: None,
+            tab_row,
+            tabs,
             search,
             go,
             status,
@@ -182,14 +195,28 @@ impl Inbox {
         (inbox, column)
     }
 
-    /// Tell the inbox which channels have a list of conversations. It shows the first one.
-    /// The action, if there is one, loads the first page of a channel that is new here.
+    /// Tell the inbox which channels have a list of conversations. It keeps the channel that
+    /// shows, if that channel is there, and else shows the first one. The action, if there
+    /// is one, loads the first page of the channel that shows now.
     pub fn set_channels(&mut self, w: &mut Window, browsable: &[String]) -> Option<InboxAction> {
-        let channel = browsable.first();
-        if channel == self.channel.as_ref() {
+        if browsable == self.channels {
             return None;
         }
-        self.channel = channel.cloned();
+        self.channels = browsable.to_vec();
+        let kept = self
+            .channel
+            .as_ref()
+            .is_some_and(|channel| browsable.contains(channel));
+        if kept {
+            self.show(w);
+            return None;
+        }
+        self.open_channel(w, browsable.first().cloned())
+    }
+
+    /// Show the first page of a channel, or no channel.
+    fn open_channel(&mut self, w: &mut Window, channel: Option<String>) -> Option<InboxAction> {
+        self.channel = channel;
         self.query.clear();
         self.items.clear();
         self.adding.clear();
@@ -202,6 +229,13 @@ impl Inbox {
 
     /// What a click on this widget asks for, if the widget is part of the inbox.
     pub fn clicked(&mut self, w: &mut Window, clicked: AnyId) -> Option<InboxAction> {
+        if let Some(index) = self.tabs.iter().position(|tab| clicked == *tab) {
+            let channel = self.channels.get(index).cloned()?;
+            if self.channel.as_ref() == Some(&channel) {
+                return None;
+            }
+            return self.open_channel(w, Some(channel));
+        }
         let channel = self.channel.clone()?;
         let action = if clicked == self.go {
             return self.submitted(w, self.search.into());
@@ -352,6 +386,15 @@ impl Inbox {
 
     /// Make the widgets agree with the state.
     fn show(&mut self, w: &mut Window) {
+        w.set_visible(self.tab_row, self.channels.len() > 1);
+        for (index, tab) in self.tabs.iter().enumerate() {
+            let channel = self.channels.get(index);
+            w.set_visible(*tab, channel.is_some());
+            if let Some(channel) = channel {
+                w.set_text(*tab, &tab_label(channel));
+                w.set_selected(*tab, self.channel.as_ref() == Some(channel));
+            }
+        }
         let connected = self.channel.is_some();
         w.set_enabled(self.search, connected);
         w.set_enabled(self.go, connected && !self.loading);
@@ -416,6 +459,15 @@ fn slot(w: &mut Window) -> Slot {
         preview,
         read,
         add,
+    }
+}
+
+/// The name of a channel with a capital letter at its start.
+fn tab_label(channel: &str) -> String {
+    let mut chars = channel.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
     }
 }
 
@@ -503,6 +555,12 @@ mod tests {
             messages: 1,
             tracked: false,
         }
+    }
+
+    #[test]
+    fn a_tab_has_the_name_of_its_channel() {
+        assert_eq!(tab_label("gmail"), "Gmail");
+        assert_eq!(tab_label(""), "");
     }
 
     #[test]

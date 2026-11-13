@@ -790,6 +790,7 @@ dependencies = [
  "keyring-core",
  "nexo-core",
  "nexo-gmail",
+ "nexo-mail",
  "serde",
  "serde_json",
  "toml",

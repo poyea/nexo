@@ -13,7 +13,7 @@ use glasskit::window::{Window, WindowEvent};
 use nexo_core::Report;
 
 use crate::board::{Board, BoardAction};
-use crate::channels::{Channels, ChannelsAction, GmailState};
+use crate::channels::{Channels, ChannelsAction, EmailState, GmailState};
 use crate::config::{Config, Interval, Look, Unit};
 use crate::inbox::{Inbox, InboxAction};
 
@@ -351,6 +351,10 @@ impl MainWindow {
 
     pub fn set_linkedin(&mut self, on: bool, gmail: bool) {
         self.channels.set_linkedin(&mut self.window, on, gmail);
+    }
+
+    pub fn set_email(&mut self, state: &EmailState) {
+        self.channels.set_email(&mut self.window, state);
     }
 
     pub fn set_autostart(&mut self, on: bool) {

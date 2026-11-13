@@ -69,6 +69,36 @@ impl Drop for SignIn {
     }
 }
 
+/// Work on a thread of its own, for a step that can take some seconds.
+pub struct Task<T> {
+    done: Receiver<T>,
+}
+
+impl<T: Send + 'static> Task<T> {
+    /// Start the work. `on_done` runs on the other thread when [`Task::poll`] has the
+    /// result.
+    pub fn start(
+        work: impl FnOnce() -> T + Send + 'static,
+        on_done: impl Fn() + Send + 'static,
+    ) -> Result<Self> {
+        let (result, done) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("nexo-task".into())
+            .spawn(move || {
+                if result.send(work()).is_ok() {
+                    on_done();
+                }
+            })
+            .context("starting a thread")?;
+        Ok(Self { done })
+    }
+
+    /// The result, if the work ended.
+    pub fn poll(&self) -> Option<T> {
+        self.done.try_recv().ok()
+    }
+}
+
 /// Show a web page in the browser of the user.
 pub fn open_url(url: &str) -> Result<()> {
     std::process::Command::new("rundll32")
@@ -76,4 +106,18 @@ pub fn open_url(url: &str) -> Result<()> {
         .spawn()
         .map(drop)
         .with_context(|| format!("opening {url}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_task_gives_its_result_one_time() {
+        let (wake, woken) = mpsc::channel();
+        let task = Task::start(|| 6 * 7, move || wake.send(()).unwrap()).unwrap();
+        woken.recv().unwrap();
+        assert_eq!(task.poll(), Some(42));
+        assert_eq!(task.poll(), None);
+    }
 }

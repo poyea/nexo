@@ -6,11 +6,15 @@ use glasskit::widget::{
 };
 use glasskit::window::Window;
 use nexo_gmail::App;
+use nexo_mail::{Account, IMAP_PORT, SMTP_PORT, Server};
 
 const GMAIL_SETUP: &str = "Gmail needs an OAuth client of your own Google Cloud project: turn on \
     the Gmail API in the project, make an OAuth client of the type \"Desktop app\", and paste \
     its client ID and client secret here. The sign-in then opens in your browser.";
 const MISSING: &str = "Type the client ID and the client secret.";
+const EMAIL_SETUP: &str = "For a mailbox with IMAP and SMTP. If the service has app passwords, \
+    make one for nexo. A server can have a port, such as 127.0.0.1:1143; without one, nexo \
+    uses 993 for IMAP and 465 for SMTP.";
 
 /// What the user asked for on the channels page.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +28,9 @@ pub enum ChannelsAction {
     OpenGoogleCloud,
     /// Turn the LinkedIn channel on or off.
     SetLinkedIn(bool),
+    /// Sign in to a mailbox with IMAP and SMTP.
+    ConnectEmail(Account),
+    DisconnectEmail,
 }
 
 /// Where the Gmail channel is.
@@ -36,6 +43,155 @@ pub enum GmailState {
     On(String),
     /// Not connected, with the reason.
     Failed(String),
+}
+
+/// Where the email channel is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EmailState {
+    Off,
+    /// nexo signs in to the servers now.
+    Checking,
+    /// Connected, with the address of the user.
+    On(String),
+    /// Not connected, with the reason.
+    Failed(String),
+}
+
+/// The text boxes and buttons of the email card.
+struct EmailCard {
+    state: Id<kind::Text>,
+    setup: Id<kind::Column>,
+    address: Id<kind::TextBox>,
+    password: Id<kind::TextBox>,
+    imap: Id<kind::TextBox>,
+    smtp: Id<kind::TextBox>,
+    username: Id<kind::TextBox>,
+    connect: Id<kind::Button>,
+    disconnect: Id<kind::Button>,
+}
+
+impl EmailCard {
+    fn build(w: &mut Window) -> (Self, Id<kind::Card>) {
+        let title = w.add(Text::new("Email").style(TextStyle::BodyStrong));
+        let state = w.add(Text::new("").style(TextStyle::Caption));
+        let lines = w.add(
+            Column::new()
+                .width(Length::Fill(1.0))
+                .gap(4.0)
+                .child(title)
+                .child(state),
+        );
+        let disconnect = w.add(Button::new("Disconnect"));
+        let head = w.add(Row::new().gap(8.0).child(lines).child(disconnect));
+        let how = w.add(Text::new(EMAIL_SETUP).style(TextStyle::Caption));
+        let mut text_box = |hint: &str| {
+            w.add(
+                TextBox::new()
+                    .placeholder(hint)
+                    .max_length(200)
+                    .width(Length::Fill(1.0)),
+            )
+        };
+        let address = text_box("Mail address");
+        let password = text_box("Password, or app password");
+        let imap = text_box("IMAP server, such as imap.example.com");
+        let smtp = text_box("SMTP server, such as smtp.example.com");
+        let username = text_box("User name, if it is not the mail address");
+        let connect = w.add(Button::new("Connect").accent());
+        let buttons = w.add(Row::new().gap(8.0).child(connect));
+        let setup = w.add(
+            Column::new()
+                .gap(8.0)
+                .child(how)
+                .child(address)
+                .child(password)
+                .child(imap)
+                .child(smtp)
+                .child(username)
+                .child(buttons),
+        );
+        let parts = w.add(Column::new().gap(12.0).child(head).child(setup));
+        let card = w.add(Card::new().child(parts));
+        let email = Self {
+            state,
+            setup,
+            address,
+            password,
+            imap,
+            smtp,
+            username,
+            connect,
+            disconnect,
+        };
+        (email, card)
+    }
+
+    fn set(&self, w: &mut Window, state: &EmailState) {
+        let words = match state {
+            EmailState::Off => "Not connected".to_owned(),
+            EmailState::Checking => "Signing in to the servers".to_owned(),
+            EmailState::On(address) => format!("Connected as {address}"),
+            EmailState::Failed(why) => format!("Not connected: {why}"),
+        };
+        w.set_text(self.state, &words);
+        let on = matches!(state, EmailState::On(_));
+        let checking = *state == EmailState::Checking;
+        w.set_visible(self.setup, !on);
+        w.set_visible(self.disconnect, on);
+        for id in [
+            self.address,
+            self.password,
+            self.imap,
+            self.smtp,
+            self.username,
+        ] {
+            w.set_enabled(id, !checking);
+        }
+        w.set_enabled(self.connect, !checking);
+        if on {
+            w.set_text(self.password, "");
+        }
+    }
+
+    /// The account in the text boxes, or what is wrong with it.
+    fn account(&self, w: &Window) -> Result<Account, String> {
+        account(
+            &w.text(self.address),
+            &w.text(self.password),
+            &w.text(self.imap),
+            &w.text(self.smtp),
+            &w.text(self.username),
+        )
+    }
+}
+
+/// The account that the user typed, or what is wrong with it.
+fn account(
+    address: &str,
+    password: &str,
+    imap: &str,
+    smtp: &str,
+    username: &str,
+) -> Result<Account, String> {
+    let address = address.trim();
+    if !address.contains('@') || address.contains(char::is_whitespace) {
+        return Err("Type your mail address.".into());
+    }
+    if password.is_empty() {
+        return Err("Type the password.".into());
+    }
+    let username = match username.trim() {
+        "" => address,
+        username => username,
+    };
+    Ok(Account {
+        address: address.to_owned(),
+        username: username.to_owned(),
+        password: password.to_owned(),
+        imap: Server::parse(imap, IMAP_PORT).map_err(|why| format!("IMAP server: {why}"))?,
+        smtp: Server::parse(smtp, SMTP_PORT).map_err(|why| format!("SMTP server: {why}"))?,
+        plaintext: false,
+    })
 }
 
 /// The channels page: one card for each channel that nexo has.
@@ -51,6 +207,7 @@ pub struct Channels {
     linkedin_state: Id<kind::Text>,
     linkedin_switch: Id<kind::Button>,
     linkedin_on: bool,
+    email: EmailCard,
 }
 
 impl Channels {
@@ -115,6 +272,8 @@ impl Channels {
         let row = w.add(Row::new().gap(8.0).child(lines).child(linkedin_switch));
         let linkedin = w.add(Card::new().child(row));
 
+        let (email, email_card) = EmailCard::build(w);
+
         let about = w.add(
             Text::new(
                 "A channel brings the messages of one service into nexo. You pick the \
@@ -134,10 +293,20 @@ impl Channels {
             linkedin_state,
             linkedin_switch,
             linkedin_on: false,
+            email,
         };
         channels.set_gmail(w, &GmailState::Off);
         channels.set_linkedin(w, false, false);
-        (channels, vec![gmail.into(), linkedin.into(), about.into()])
+        channels.set_email(w, &EmailState::Off);
+        (
+            channels,
+            vec![
+                gmail.into(),
+                linkedin.into(),
+                email_card.into(),
+                about.into(),
+            ],
+        )
     }
 
     pub fn set_gmail(&mut self, w: &mut Window, state: &GmailState) {
@@ -173,6 +342,10 @@ impl Channels {
         w.set_enabled(self.linkedin_switch, on || gmail);
     }
 
+    pub fn set_email(&mut self, w: &mut Window, state: &EmailState) {
+        self.email.set(w, state);
+    }
+
     /// What a click on this widget asks for, if the widget is part of the page.
     pub fn clicked(&mut self, w: &mut Window, clicked: AnyId) -> Option<ChannelsAction> {
         if clicked == self.connect {
@@ -189,6 +362,16 @@ impl Channels {
             Some(ChannelsAction::CancelGmail)
         } else if clicked == self.disconnect {
             Some(ChannelsAction::DisconnectGmail)
+        } else if clicked == self.email.connect {
+            match self.email.account(w) {
+                Ok(account) => Some(ChannelsAction::ConnectEmail(account)),
+                Err(why) => {
+                    w.set_text(self.email.state, &why);
+                    None
+                }
+            }
+        } else if clicked == self.email.disconnect {
+            Some(ChannelsAction::DisconnectEmail)
         } else if clicked == self.linkedin_switch {
             Some(ChannelsAction::SetLinkedIn(!self.linkedin_on))
         } else if clicked == self.console {
@@ -216,6 +399,42 @@ fn linkedin_words(on: bool, gmail: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_typed_account_gets_the_usual_ports_and_the_address_as_user_name() {
+        let typed = account(
+            " me@example.com ",
+            "pw",
+            "imap.example.com",
+            "127.0.0.1:1025",
+            "",
+        );
+        let typed = typed.unwrap();
+        assert_eq!(typed.address, "me@example.com");
+        assert_eq!(typed.username, "me@example.com");
+        assert_eq!((typed.imap.port, typed.smtp.port), (993, 1025));
+        assert!(!typed.plaintext);
+        let named = account("me@example.com", "pw", "a.example", "b.example", " me ").unwrap();
+        assert_eq!(named.username, "me");
+    }
+
+    #[test]
+    fn a_wrong_account_tells_what_is_wrong() {
+        let wrong = |address, password, imap| account(address, password, imap, "s.example", "");
+        assert_eq!(
+            wrong("me", "pw", "i.example").unwrap_err(),
+            "Type your mail address."
+        );
+        assert_eq!(
+            wrong("me@example.com", "", "i.example").unwrap_err(),
+            "Type the password."
+        );
+        assert!(
+            wrong("me@example.com", "pw", "")
+                .unwrap_err()
+                .starts_with("IMAP server:")
+        );
+    }
 
     #[test]
     fn the_linkedin_card_tells_what_it_needs() {
