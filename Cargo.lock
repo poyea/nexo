@@ -290,9 +290,9 @@ dependencies = [
 
 [[package]]
 name = "glasskit"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3061133908eb76b4c499db30693f423407e20a2c620148af4458430f7cac78bc"
+checksum = "a57f6c170c4433df430d3da10de9b5fb1759ea5c1998adee961ba2f16516826c"
 dependencies = [
  "windows",
  "windows-numerics",
