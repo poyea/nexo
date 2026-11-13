@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
+use glasskit::widget::SideMode;
 use glasskit::window::Material;
 use serde::{Deserialize, Serialize};
 
@@ -83,6 +84,54 @@ impl Look {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Side {
+    #[default]
+    Expanded,
+    Icons,
+    /// Only the button that changes the side list.
+    Collapsed,
+}
+
+impl Side {
+    pub const ALL: [Side; 3] = [Side::Expanded, Side::Icons, Side::Collapsed];
+
+    /// The name in the config file.
+    fn name(self) -> &'static str {
+        match self {
+            Side::Expanded => "expanded",
+            Side::Icons => "icons",
+            Side::Collapsed => "collapsed",
+        }
+    }
+
+    /// The name that the user sees.
+    pub fn label(self) -> &'static str {
+        match self {
+            Side::Expanded => "Expanded",
+            Side::Icons => "Icons",
+            Side::Collapsed => "Collapsed",
+        }
+    }
+
+    pub fn mode(self) -> SideMode {
+        match self {
+            Side::Expanded => SideMode::Expanded,
+            Side::Icons => SideMode::Icons,
+            Side::Collapsed => SideMode::Collapsed,
+        }
+    }
+
+    pub fn of(mode: SideMode) -> Self {
+        match mode {
+            SideMode::Expanded => Side::Expanded,
+            SideMode::Icons => Side::Icons,
+            SideMode::Collapsed => Side::Collapsed,
+        }
+    }
+}
+
 /// The time from the end of one sync to the start of the next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Interval {
@@ -131,6 +180,8 @@ pub struct Config {
     sync_unit: Unit,
     #[serde(default)]
     pub look: Look,
+    #[serde(default)]
+    pub side: Side,
     /// Read the notification emails of LinkedIn in the Gmail of the user.
     #[serde(default)]
     pub linkedin: bool,
@@ -159,6 +210,7 @@ impl Config {
             sync_every: default_sync_every(),
             sync_unit: default_sync_unit(),
             look: Look::default(),
+            side: Side::default(),
             linkedin: false,
         })
     }
@@ -205,6 +257,12 @@ impl Config {
     pub fn save_look(&mut self, path: &Path, look: Look) -> Result<()> {
         save_values(path, &[("look", toml_edit::value(look.name()))])?;
         self.look = look;
+        Ok(())
+    }
+
+    pub fn save_side(&mut self, path: &Path, side: Side) -> Result<()> {
+        save_values(path, &[("side", toml_edit::value(side.name()))])?;
+        self.side = side;
         Ok(())
     }
 }
@@ -363,5 +421,23 @@ mod tests {
             assert_eq!(toml::from_str::<Config>(&saved).unwrap().look, look);
         }
         assert!(toml::from_str::<Config>(&format!("{OUTPUT}look = \"clear\"")).is_err());
+    }
+
+    #[test]
+    fn the_side_list_is_expanded_unless_the_file_says_more() {
+        let config: Config = toml::from_str(OUTPUT).unwrap();
+        assert_eq!(config.side, Side::Expanded);
+        for side in Side::ALL {
+            let saved = with_values(OUTPUT, &[("side", toml_edit::value(side.name()))]).unwrap();
+            assert_eq!(toml::from_str::<Config>(&saved).unwrap().side, side);
+        }
+        assert!(toml::from_str::<Config>(&format!("{OUTPUT}side = \"wide\"")).is_err());
+    }
+
+    #[test]
+    fn each_side_has_a_mode_of_its_own() {
+        for side in Side::ALL {
+            assert_eq!(Side::of(side.mode()), side);
+        }
     }
 }

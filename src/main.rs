@@ -176,6 +176,11 @@ fn run_window(
                                 glasskit::show_error(APP_NAME, &format!("{err:#}"));
                             }
                         }
+                        Action::SetSide(side) => {
+                            if let Err(err) = config.save_side(config_path, side) {
+                                glasskit::show_error(APP_NAME, &format!("{err:#}"));
+                            }
+                        }
                         Action::Board(BoardAction::Open(dir)) => open_folder(&dir),
                         Action::Channels(action) => {
                             let cx = Cx {

@@ -6,21 +6,30 @@ use glasskit::Ui;
 use glasskit::events::WindowId;
 use glasskit::tray::Icon;
 use glasskit::widget::{
-    Align, AnyId, Button, Card, Column, Id, Insets, Length, NavItem, Row, Scroll, Spacer, Stack,
-    Text, TextBox, TextStyle, kind,
+    Align, AnyId, Button, Card, Column, Id, Insets, Length, NavItem, Row, Scroll, SideBar, Spacer,
+    Stack, Text, TextBox, TextStyle, kind,
 };
 use glasskit::window::{Window, WindowEvent};
 use nexo_core::Report;
 
 use crate::board::{Board, BoardAction};
 use crate::channels::{Channels, ChannelsAction, EmailState, GmailState, TelegramState};
-use crate::config::{Config, Interval, Look, Unit};
+use crate::config::{Config, Interval, Look, Side, Unit};
 use crate::inbox::{Inbox, InboxAction};
 
 const SIDE_WIDTH: f32 = 208.0;
 const ICON_SIZE: u32 = 64;
 const INTERVAL_HINT: &str = "Type a number from 1, and pick seconds or minutes.";
 const LOOK_HINT: &str = "How much of the desktop shows through the window.";
+const SIDE_HINT: &str = "The list of pages at the left: names, icons, or only its button.";
+/// The pages of the side list, each with its icon in Segoe Fluent Icons.
+const PAGES: [(&str, &str); 5] = [
+    ("Overview", "\u{E80F}"),
+    ("Inbox", "\u{E715}"),
+    ("Board", "\u{E8A9}"),
+    ("Channels", "\u{E71B}"),
+    ("Settings", "\u{E713}"),
+];
 
 /// What the user asked for in the window.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +39,7 @@ pub enum Action {
     ToggleAutostart,
     SetInterval(Interval),
     SetLook(Look),
+    SetSide(Side),
     Board(BoardAction),
     Inbox(InboxAction),
     Channels(ChannelsAction),
@@ -118,6 +128,9 @@ pub struct MainWindow {
     unit: Unit,
     looks: [(Id<kind::NavItem>, Look); 3],
     look: Look,
+    sides: [(Id<kind::NavItem>, Side); 3],
+    side: Side,
+    bar: Id<kind::SideBar>,
     board: Board,
     inbox: Inbox,
     channels: Channels,
@@ -194,6 +207,15 @@ impl MainWindow {
             &looks.map(|(item, _)| item.into()),
         );
         w.set_material(config.look.material());
+        let side_title = w.add(Text::new("Side list"));
+        let side_note = w.add(Text::new(SIDE_HINT).style(TextStyle::Caption));
+        let sides = Side::ALL.map(|side| (w.add(NavItem::new(side.label())), side));
+        let side_setting = setting(
+            &mut w,
+            side_title,
+            side_note,
+            &sides.map(|(item, _)| item.into()),
+        );
         let autostart_title = w.add(Text::new("Start with Windows"));
         let autostart_state = w.add(Text::new("").style(TextStyle::Caption));
         let autostart_button = w.add(Button::new(""));
@@ -216,39 +238,21 @@ impl MainWindow {
                 folder.into(),
                 schedule.into(),
                 look.into(),
+                side_setting.into(),
                 startup.into(),
                 how.into(),
             ],
         );
 
-        let brand = w.add(Text::new("nexo").style(TextStyle::Subtitle));
-        let brand = w.add(
-            Column::new()
-                .padding(Insets {
-                    left: 16.0,
-                    top: 8.0,
-                    right: 16.0,
-                    bottom: 12.0,
-                })
-                .child(brand),
-        );
-        let items = [
-            w.add(NavItem::new("Overview")),
-            w.add(NavItem::new("Inbox")),
-            w.add(NavItem::new("Board")),
-            w.add(NavItem::new("Channels")),
-            w.add(NavItem::new("Settings")),
-        ];
+        let items = PAGES.map(|(name, icon)| w.add(NavItem::new(name).icon(icon)));
         let gap = w.add(Spacer::fill());
-        let side = w.add(
-            Column::new()
-                .width(Length::Fixed(SIDE_WIDTH))
+        let bar = w.add(
+            SideBar::new()
+                .title("nexo")
+                .expanded_width(SIDE_WIDTH)
+                .mode(config.side.mode())
                 .gap(4.0)
-                .child(brand)
-                .child(items[0])
-                .child(items[1])
-                .child(items[2])
-                .child(items[3])
+                .children(items[..4].iter().copied())
                 .child(gap)
                 .child(items[4]),
         );
@@ -259,7 +263,7 @@ impl MainWindow {
                 .padding(Insets::all(8.0))
                 .gap(8.0)
                 .align(Align::Stretch)
-                .child(side)
+                .child(bar)
                 .child(stack),
         );
         w.set_root(root);
@@ -287,12 +291,16 @@ impl MainWindow {
             unit: interval.unit,
             looks,
             look: config.look,
+            sides,
+            side: config.side,
+            bar,
             board,
             inbox,
             channels,
         };
         this.show_unit();
         this.show_look();
+        this.show_side();
         this.show_tab(0);
         this.set_autostart(autostart);
         this.window.set_icon(&app_icon(ICON_SIZE)?)?;
@@ -379,6 +387,10 @@ impl MainWindow {
                 WindowEvent::Clicked(id) => {
                     if let Some(tab) = self.tabs.iter().position(|t| id == t.item) {
                         self.show_tab(tab);
+                    } else if let Some(&(_, side)) = self.sides.iter().find(|(s, _)| id == *s) {
+                        self.side = side;
+                        self.show_side();
+                        actions.push(Action::SetSide(side));
                     } else if id == self.sync {
                         actions.push(Action::SyncNow);
                     } else if id == self.open {
@@ -410,6 +422,11 @@ impl MainWindow {
                 WindowEvent::Changed(id) if id == self.interval_box => {
                     actions.extend(self.read_interval());
                 }
+                WindowEvent::SideModeChanged(id) if id == self.bar => {
+                    self.side = Side::of(self.window.side_mode(self.bar));
+                    self.show_side();
+                    actions.push(Action::SetSide(self.side));
+                }
                 WindowEvent::CloseRequested => actions.push(Action::Close),
                 _ => {}
             }
@@ -428,6 +445,13 @@ impl MainWindow {
             self.window.set_selected(item, look == self.look);
         }
         self.window.set_material(self.look.material());
+    }
+
+    fn show_side(&mut self) {
+        for (item, side) in self.sides {
+            self.window.set_selected(item, side == self.side);
+        }
+        self.window.set_side_mode(self.bar, self.side.mode());
     }
 
     /// The interval in the text box, if it is valid. If not, the card says why.
