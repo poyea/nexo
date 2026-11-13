@@ -1,0 +1,23 @@
+[package]
+name = "nexo-mail"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "The email channel of nexo, for a mailbox with IMAP and SMTP."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+getrandom = "0.4"
+imap = "3.0.0-alpha.15"
+imap-proto = "0.16"
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "native-tls"] }
+mailparse = "0.18"
+native-tls = "0.2"
+nexo-core = { path = "../core" }
+serde.workspace = true
