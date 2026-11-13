@@ -90,19 +90,16 @@ pub enum Side {
     #[default]
     Expanded,
     Icons,
-    /// Only the button that changes the side list.
-    Collapsed,
 }
 
 impl Side {
-    pub const ALL: [Side; 3] = [Side::Expanded, Side::Icons, Side::Collapsed];
+    pub const ALL: [Side; 2] = [Side::Expanded, Side::Icons];
 
     /// The name in the config file.
     fn name(self) -> &'static str {
         match self {
             Side::Expanded => "expanded",
             Side::Icons => "icons",
-            Side::Collapsed => "collapsed",
         }
     }
 
@@ -111,7 +108,6 @@ impl Side {
         match self {
             Side::Expanded => "Expanded",
             Side::Icons => "Icons",
-            Side::Collapsed => "Collapsed",
         }
     }
 
@@ -119,15 +115,13 @@ impl Side {
         match self {
             Side::Expanded => SideMode::Expanded,
             Side::Icons => SideMode::Icons,
-            Side::Collapsed => SideMode::Collapsed,
         }
     }
 
     pub fn of(mode: SideMode) -> Self {
         match mode {
             SideMode::Expanded => Side::Expanded,
-            SideMode::Icons => Side::Icons,
-            SideMode::Collapsed => Side::Collapsed,
+            SideMode::Icons | SideMode::Collapsed => Side::Icons,
         }
     }
 }

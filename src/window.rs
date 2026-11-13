@@ -21,7 +21,7 @@ const SIDE_WIDTH: f32 = 208.0;
 const ICON_SIZE: u32 = 64;
 const INTERVAL_HINT: &str = "Type a number from 1, and pick seconds or minutes.";
 const LOOK_HINT: &str = "How much of the desktop shows through the window.";
-const SIDE_HINT: &str = "The list of pages at the left: names, icons, or only its button.";
+const SIDE_HINT: &str = "The list of pages at the left: with names, or only icons.";
 /// The pages of the side list, each with its icon in Segoe Fluent Icons.
 const PAGES: [(&str, &str); 5] = [
     ("Overview", "\u{E80F}"),
@@ -128,7 +128,7 @@ pub struct MainWindow {
     unit: Unit,
     looks: [(Id<kind::NavItem>, Look); 3],
     look: Look,
-    sides: [(Id<kind::NavItem>, Side); 3],
+    sides: [(Id<kind::NavItem>, Side); 2],
     side: Side,
     bar: Id<kind::SideBar>,
     board: Board,
@@ -251,6 +251,7 @@ impl MainWindow {
                 .title("nexo")
                 .expanded_width(SIDE_WIDTH)
                 .mode(config.side.mode())
+                .modes(Side::ALL.map(Side::mode))
                 .gap(4.0)
                 .children(items[..4].iter().copied())
                 .child(gap)
