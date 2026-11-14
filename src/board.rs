@@ -1,18 +1,20 @@
 // Copyright (c) 2026 John Law
 // SPDX-License-Identifier: MIT
 
-use std::path::PathBuf;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 
+use anyhow::{Context, Result};
 use chrono::Local;
-use glasskit::widget::{
-    Align, AnyId, Button, Card, Column, Id, Insets, Length, Row, Scroll, Text, TextStyle, kind,
-};
-use glasskit::window::Window;
+use glasskit::Ui;
+use glasskit::kanban::{Board as Lanes, BoardEvent, CardData, CardKey};
+use glasskit::widget::{AnyId, Button, Column, Id, Length, Row, Spacer, Tint, kind};
+use glasskit::window::{Window, WindowEvent};
 use nexo_core::{Card as Conversation, Stage};
+use serde::{Deserialize, Serialize};
 
-/// How many cards a lane shows. A lane scrolls, and the rest after these is a count.
-const SLOTS: usize = 40;
-const MAX_TITLE_CHARS: usize = 32;
+const LANES: [&str; 3] = ["To do", "Waiting", "Done"];
+const MAX_TITLE_CHARS: usize = 60;
 
 /// What the user asked for on the board.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,170 +28,231 @@ pub enum BoardAction {
     },
 }
 
-/// A place for one card. Its widgets stay, and show a different conversation each time.
-struct Slot {
-    card: Id<kind::Card>,
-    title: Id<kind::Text>,
-    note: Id<kind::Text>,
-    open: Id<kind::Button>,
-    mark: Id<kind::Button>,
-    shown: Option<Conversation>,
+/// The board as the file keeps it: the colors of the lanes, and the tasks of the user.
+/// The conversations are not in the file.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+struct Saved {
+    #[serde(default)]
+    lanes: Vec<SavedLane>,
 }
 
-struct Lane {
-    stage: Stage,
-    heading: Id<kind::Text>,
-    slots: Vec<Slot>,
-    /// A note under the cards: that the lane is empty, or how many cards do not show.
-    rest: Id<kind::Text>,
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+struct SavedLane {
+    #[serde(default)]
+    color: Option<String>,
+    #[serde(default)]
+    cards: Vec<SavedCard>,
 }
 
-/// The board: one lane for each stage, with the conversations as cards.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SavedCard {
+    title: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    pinned: bool,
+    #[serde(default)]
+    archived: bool,
+    #[serde(default)]
+    color: Option<String>,
+}
+
+/// The board: lanes with the tasks of the user and the conversations as cards.
 pub struct Board {
-    lanes: Vec<Lane>,
+    lanes: Lanes,
+    path: PathBuf,
+    archived: Id<kind::Button>,
+    /// The card of each conversation.
+    conversations: Vec<(CardKey, Conversation)>,
 }
 
 impl Board {
-    /// Make the widgets, and give the row that holds the lanes.
-    pub fn build(w: &mut Window) -> (Self, Id<kind::Row>) {
-        let lanes: Vec<(Lane, Id<kind::Column>)> =
-            Stage::ALL.into_iter().map(|stage| lane(w, stage)).collect();
-        let row = w.add(
-            Row::new()
-                .gap(12.0)
-                .align(Align::Start)
+    /// Make the widgets with the tasks of the file, and give the column that holds them.
+    pub fn build(w: &mut Window, path: &Path) -> Result<(Self, Id<kind::Column>)> {
+        let mut lanes = Lanes::new(w, &LANES);
+        for (lane, saved) in load(path)?.lanes.into_iter().enumerate() {
+            lanes.set_lane_tint(w, lane, tint(saved.color.as_deref()));
+            for card in saved.cards {
+                let card = CardData {
+                    title: card.title,
+                    body: card.body,
+                    pinned: card.pinned,
+                    archived: card.archived,
+                    tint: tint(card.color.as_deref()),
+                    locked: false,
+                };
+                lanes.add_card(w, lane, card);
+            }
+        }
+        let gap = w.add(Spacer::fill());
+        let archived = w.add(Button::new("Show archived"));
+        let bar = w.add(Row::new().child(gap).child(archived));
+        let column = w.add(
+            Column::new()
+                .gap(8.0)
                 .height(Length::Fill(1.0))
-                .children(lanes.iter().map(|(_, column)| *column)),
+                .child(bar)
+                .child(lanes.widget()),
         );
-        let mut board = Self {
-            lanes: lanes.into_iter().map(|(lane, _)| lane).collect(),
+        let board = Self {
+            lanes,
+            path: path.to_owned(),
+            archived,
+            conversations: Vec::new(),
         };
-        board.set(w, &[]);
-        (board, row)
+        Ok((board, column))
     }
 
-    /// Show these conversations. They are in the order that the lanes show them.
+    /// Show these conversations as cards, each in the lane of its stage.
     pub fn set(&mut self, w: &mut Window, cards: &[Conversation]) {
-        for lane in &mut self.lanes {
-            let mut mine = cards.iter().filter(|c| c.stage == lane.stage);
-            let total = mine.clone().count();
-            w.set_text(lane.heading, &heading(lane.stage, total));
-            for slot in &mut lane.slots {
-                slot.shown = mine.next().cloned();
-                w.set_visible(slot.card, slot.shown.is_some());
-                if let Some(card) = &slot.shown {
-                    w.set_text(slot.title, &title(&card.title));
-                    w.set_text(slot.note, &note(card));
-                    w.set_text(slot.mark, mark_label(card.stage));
+        let same = |a: &Conversation, b: &Conversation| a.channel == b.channel && a.id == b.id;
+        let lanes = &mut self.lanes;
+        self.conversations.retain(|(key, old)| {
+            let stays = cards.iter().any(|card| same(card, old));
+            if !stays {
+                lanes.remove_card(w, *key);
+            }
+            stays
+        });
+        for card in cards {
+            let data = CardData {
+                locked: true,
+                ..CardData::new(title(&card.title), note(card))
+            };
+            let lane = lane_of(card.stage);
+            match self
+                .conversations
+                .iter_mut()
+                .find(|(_, old)| same(card, old))
+            {
+                Some((key, old)) => {
+                    lanes.set_card(w, *key, data);
+                    if lanes.place(*key).is_some_and(|(at, _)| at != lane) {
+                        lanes.move_card(w, *key, lane, usize::MAX);
+                    }
+                    *old = card.clone();
+                }
+                None => {
+                    if let Some(key) = lanes.add_card(w, lane, data) {
+                        self.conversations.push((key, card.clone()));
+                    }
                 }
             }
-            let rest = rest(total);
-            w.set_visible(lane.rest, !rest.is_empty());
-            w.set_text(lane.rest, &rest);
         }
     }
 
-    /// What a click on this widget asks for, if the widget is a button of the board.
-    pub fn action(&self, clicked: AnyId) -> Option<BoardAction> {
-        let slots = self.lanes.iter().flat_map(|lane| &lane.slots);
-        for slot in slots {
-            let Some(card) = &slot.shown else {
-                continue;
+    /// What a click on this widget does, if the widget is the button of the page.
+    pub fn clicked(&mut self, w: &mut Window, clicked: AnyId) {
+        if clicked == self.archived {
+            let show = !self.lanes.show_archived();
+            self.lanes.set_show_archived(w, show);
+            let label = if show {
+                "Hide archived"
+            } else {
+                "Show archived"
             };
-            if clicked == slot.open {
-                return Some(BoardAction::Open(card.dir.clone()));
-            }
-            if clicked == slot.mark {
-                return Some(BoardAction::SetDone {
-                    channel: card.channel.clone(),
-                    id: card.id.clone(),
-                    done: card.stage != Stage::Done,
-                });
-            }
+            w.set_text(self.archived, label);
         }
-        None
     }
-}
 
-fn lane(w: &mut Window, stage: Stage) -> (Lane, Id<kind::Column>) {
-    let heading = w.add(Text::new("").style(TextStyle::BodyStrong));
-    let slots: Vec<Slot> = (0..SLOTS).map(|_| slot(w)).collect();
-    let rest = w.add(Text::new("").style(TextStyle::Caption));
-    // Space at the right keeps the cards clear of the scroll bar.
-    let cards = w.add(
-        Scroll::new()
-            .gap(8.0)
-            .padding(Insets {
-                left: 0.0,
-                top: 0.0,
-                right: 10.0,
-                bottom: 0.0,
+    /// Give an event of the window to the board. A change of a task goes to the file. The
+    /// action, if there is one, is for a conversation.
+    pub fn handle(
+        &mut self,
+        ui: &Ui,
+        w: &mut Window,
+        event: &WindowEvent,
+    ) -> Result<Option<BoardAction>> {
+        let Some(change) = self.lanes.handle(ui, w, event)? else {
+            return Ok(None);
+        };
+        let conversation = |key: &CardKey| {
+            let found = self.conversations.iter().find(|(k, _)| k == key);
+            found.map(|(_, card)| card.clone())
+        };
+        match &change {
+            BoardEvent::Clicked(key) => Ok(conversation(key).map(|c| BoardAction::Open(c.dir))),
+            BoardEvent::Moved(key) => match conversation(key) {
+                Some(card) => Ok(self.dropped(w, *key, &card)),
+                None => self.save().map(|()| None),
+            },
+            _ => self.save().map(|()| None),
+        }
+    }
+
+    /// A conversation went to another lane. Only the Done lane has a meaning for it: the
+    /// newest message gives its other lanes. A drop with no meaning puts the card back.
+    fn dropped(
+        &mut self,
+        w: &mut Window,
+        key: CardKey,
+        card: &Conversation,
+    ) -> Option<BoardAction> {
+        let (lane, _) = self.lanes.place(key)?;
+        let done = lane == lane_of(Stage::Done);
+        if done == (card.stage == Stage::Done) {
+            if lane != lane_of(card.stage) {
+                self.lanes
+                    .move_card(w, key, lane_of(card.stage), usize::MAX);
+            }
+            return None;
+        }
+        Some(BoardAction::SetDone {
+            channel: card.channel.clone(),
+            id: card.id.clone(),
+            done,
+        })
+    }
+
+    fn save(&self) -> Result<()> {
+        let lanes = (0..self.lanes.lane_count())
+            .map(|lane| SavedLane {
+                color: self.lanes.lane_tint(lane).map(color),
+                cards: self
+                    .lanes
+                    .cards(lane)
+                    .into_iter()
+                    .filter(|(_, card)| !card.locked)
+                    .map(|(_, card)| SavedCard {
+                        title: card.title,
+                        body: card.body,
+                        pinned: card.pinned,
+                        archived: card.archived,
+                        color: card.tint.map(color),
+                    })
+                    .collect(),
             })
-            .children(slots.iter().map(|slot| slot.card))
-            .child(rest),
-    );
-    let column = w.add(
-        Column::new()
-            .width(Length::Fill(1.0))
-            .gap(8.0)
-            .child(heading)
-            .child(cards),
-    );
-    let lane = Lane {
-        stage,
-        heading,
-        slots,
-        rest,
-    };
-    (lane, column)
-}
-
-fn slot(w: &mut Window) -> Slot {
-    let title = w.add(Text::new("").style(TextStyle::BodyStrong));
-    let note = w.add(Text::new("").style(TextStyle::Caption));
-    let open = w.add(Button::new("Open"));
-    let mark = w.add(Button::new(""));
-    let buttons = w.add(Row::new().gap(8.0).child(open).child(mark));
-    let lines = w.add(
-        Column::new()
-            .gap(4.0)
-            .align(Align::Start)
-            .child(title)
-            .child(note)
-            .child(buttons),
-    );
-    let card = w.add(Card::new().child(lines));
-    Slot {
-        card,
-        title,
-        note,
-        open,
-        mark,
-        shown: None,
+            .collect();
+        let json = serde_json::to_string_pretty(&Saved { lanes })?;
+        nexo_core::write_atomically(&self.path, json)
+            .with_context(|| format!("saving {}", self.path.display()))
     }
 }
 
-fn heading(stage: Stage, total: usize) -> String {
-    let name = match stage {
-        Stage::ToReply => "To reply",
-        Stage::Waiting => "Waiting",
-        Stage::Done => "Done",
-    };
-    format!("{name}  {total}")
+/// A file that is not there gives an empty board.
+fn load(path: &Path) -> Result<Saved> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => {
+            serde_json::from_str(&text).with_context(|| format!("reading {}", path.display()))
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(Saved::default()),
+        Err(err) => Err(err).with_context(|| format!("reading {}", path.display())),
+    }
 }
 
-fn mark_label(stage: Stage) -> &'static str {
+fn tint(name: Option<&str>) -> Option<Tint> {
+    Tint::from_name(name?)
+}
+
+fn color(tint: Tint) -> String {
+    tint.name().to_lowercase()
+}
+
+fn lane_of(stage: Stage) -> usize {
     match stage {
-        Stage::Done => "Reopen",
-        Stage::ToReply | Stage::Waiting => "Done",
-    }
-}
-
-fn rest(total: usize) -> String {
-    match total.saturating_sub(SLOTS) {
-        _ if total == 0 => "Nothing here".into(),
-        0 => String::new(),
-        more => format!("and {more} more"),
+        Stage::ToReply => 0,
+        Stage::Waiting => 1,
+        Stage::Done => 2,
     }
 }
 
@@ -218,33 +281,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn headings_count_the_cards() {
-        assert_eq!(heading(Stage::ToReply, 3), "To reply  3");
-        assert_eq!(heading(Stage::Done, 0), "Done  0");
-    }
-
-    #[test]
-    fn rest_tells_of_an_empty_lane_and_of_hidden_cards() {
-        assert_eq!(rest(0), "Nothing here");
-        assert_eq!(rest(1), "");
-        assert_eq!(rest(SLOTS), "");
-        assert_eq!(rest(SLOTS + 3), "and 3 more");
+    fn each_stage_has_a_lane() {
+        let lanes = Stage::ALL.map(lane_of);
+        assert_eq!(lanes, [0, 1, 2]);
+        assert_eq!(LANES[lane_of(Stage::Done)], "Done");
     }
 
     #[test]
     fn a_long_title_is_cut() {
         assert_eq!(title("Jane Doe"), "Jane Doe");
-        let long = "A group with a very long name of many people";
+        let long = "A group with a very long name of many people from all the teams of the firm";
         let cut = title(long);
-        assert_eq!(cut, "A group with a very long name...");
+        assert!(cut.ends_with("..."));
         assert_eq!(cut.chars().count(), MAX_TITLE_CHARS);
-    }
-
-    #[test]
-    fn done_cards_can_be_opened_again() {
-        assert_eq!(mark_label(Stage::Done), "Reopen");
-        assert_eq!(mark_label(Stage::ToReply), "Done");
-        assert_eq!(mark_label(Stage::Waiting), "Done");
     }
 
     #[test]
@@ -258,5 +307,27 @@ mod tests {
             latest: None,
         };
         assert_eq!(note(&card), "chat - no messages");
+    }
+
+    #[test]
+    fn a_file_that_is_not_there_gives_an_empty_board() {
+        let path = std::env::temp_dir().join(format!("nexo-no-board-{}.json", std::process::id()));
+        assert_eq!(load(&path).unwrap(), Saved::default());
+    }
+
+    #[test]
+    fn a_task_needs_only_a_title_in_the_file() {
+        let path = std::env::temp_dir().join(format!("nexo-board-{}.json", std::process::id()));
+        let text = r#"{"lanes": [{"color": "Blue", "cards": [{"title": "Plan"}]}, {}]}"#;
+        std::fs::write(&path, text).unwrap();
+        let saved = load(&path);
+        std::fs::remove_file(&path).unwrap();
+        let saved = saved.unwrap();
+        assert_eq!(saved.lanes.len(), 2);
+        assert_eq!(tint(saved.lanes[0].color.as_deref()), Some(Tint::Blue));
+        assert_eq!(saved.lanes[0].cards[0].title, "Plan");
+        assert_eq!(saved.lanes[0].cards[0].color, None);
+        assert_eq!(color(Tint::Blue), "blue");
+        assert_eq!(tint(Some("none")), None);
     }
 }

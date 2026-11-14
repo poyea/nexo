@@ -1,6 +1,8 @@
 // Copyright (c) 2026 John Law
 // SPDX-License-Identifier: MIT
 
+use std::path::Path;
+
 use anyhow::Result;
 use glasskit::Ui;
 use glasskit::events::WindowId;
@@ -111,6 +113,7 @@ struct Tab {
 
 pub struct MainWindow {
     window: Window,
+    ui: Ui,
     tabs: Vec<Tab>,
     headline: Id<kind::Text>,
     detail: Id<kind::Text>,
@@ -137,7 +140,7 @@ pub struct MainWindow {
 }
 
 impl MainWindow {
-    pub fn new(ui: &Ui, config: &Config, autostart: bool) -> Result<Self> {
+    pub fn new(ui: &Ui, config: &Config, board: &Path, autostart: bool) -> Result<Self> {
         let mut w = Window::new(ui, "nexo", 1000.0, 680.0)?;
         w.set_min_size(760.0, 660.0);
 
@@ -167,7 +170,7 @@ impl MainWindow {
             vec![status.into(), stats.into(), problems_card.into()],
         );
 
-        let (board, lanes) = Board::build(&mut w);
+        let (board, lanes) = Board::build(&mut w, board)?;
         // Each lane scrolls on its own, so the page does not.
         let board_page = framed(&mut w, "Board", lanes.into());
 
@@ -271,6 +274,7 @@ impl MainWindow {
 
         let mut this = Self {
             window: w,
+            ui: ui.clone(),
             tabs: items
                 .into_iter()
                 .zip(pages)
@@ -392,8 +396,13 @@ impl MainWindow {
     pub fn actions(&mut self) -> Vec<Action> {
         let mut actions = Vec::new();
         while let Some(event) = self.window.next_event() {
+            match self.board.handle(&self.ui, &mut self.window, &event) {
+                Ok(action) => actions.extend(action.map(Action::Board)),
+                Err(err) => glasskit::show_error("nexo", &format!("{err:#}")),
+            }
             match event {
                 WindowEvent::Clicked(id) => {
+                    self.board.clicked(&mut self.window, id);
                     if let Some(tab) = self.tabs.iter().position(|t| id == t.item) {
                         self.show_tab(tab);
                     } else if let Some(&(_, side)) = self.sides.iter().find(|(s, _)| id == *s) {
@@ -414,8 +423,6 @@ impl MainWindow {
                         self.look = look;
                         self.show_look();
                         actions.push(Action::SetLook(look));
-                    } else if let Some(action) = self.board.action(id) {
-                        actions.push(Action::Board(action));
                     } else if let Some(action) = self.inbox.clicked(&mut self.window, id) {
                         actions.push(Action::Inbox(action));
                     } else if let Some(action) = self.channels.clicked(&mut self.window, id) {

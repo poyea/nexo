@@ -29,6 +29,7 @@ use worker::{Outcome, Worker};
 
 const APP_NAME: &str = "nexo";
 const CONFIG_FILE: &str = "config.toml";
+const BOARD_FILE: &str = "board.json";
 
 const USAGE: &str = "\
 Usage: nexo [--once]
@@ -98,7 +99,8 @@ fn run_window(
     let repliable: Vec<String> = engine.repliable().map(str::to_owned).collect();
     let mut worker = Worker::spawn(engine, move || waker.wake())?;
     let mut autostart = glasskit::autostart::is_enabled(APP_NAME);
-    let mut window = MainWindow::new(&ui, &config, autostart)?;
+    let board_path = config_path.with_file_name(BOARD_FILE);
+    let mut window = MainWindow::new(&ui, &config, &board_path, autostart)?;
     accounts.start(events.waker());
     accounts.show(&mut window, &config);
     if let Some(action) = window.set_channels(&browsable, &repliable) {
