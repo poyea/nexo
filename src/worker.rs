@@ -77,6 +77,8 @@ pub struct Update {
     pub browsable: Vec<String>,
     /// The channels that can send replies.
     pub repliable: Vec<String>,
+    /// The size of the output folder, after a sync.
+    pub folder_bytes: Option<u64>,
 }
 
 /// The engine on a thread of its own, so that slow channels do not stop the UI.
@@ -141,8 +143,12 @@ impl Worker {
             .name("nexo-engine".into())
             .spawn(move || {
                 for request in todo {
+                    let outcome = handle(&mut engine, request);
+                    let folder_bytes = matches!(outcome, Outcome::Synced(_))
+                        .then(|| crate::usage::folder_bytes(engine.folder().root()));
                     let update = Update {
-                        outcome: handle(&mut engine, request),
+                        outcome,
+                        folder_bytes,
                         board: engine.board(),
                         browsable: engine.browsable().map(str::to_owned).collect(),
                         repliable: engine.repliable().map(str::to_owned).collect(),
@@ -375,6 +381,7 @@ mod tests {
         assert!(f.worker.is_syncing());
         let update = f.next();
         assert_eq!(update.outcome, Outcome::Synced(Report::default()));
+        assert!(update.folder_bytes.is_some());
         assert!(update.board.is_empty());
         assert!(!f.worker.is_syncing());
         assert!(f.worker.poll().unwrap().is_none());
@@ -399,6 +406,7 @@ mod tests {
         f.worker.connect(Box::new(Shop)).unwrap();
         let update = f.next();
         assert_eq!(update.outcome, Outcome::Changed);
+        assert_eq!(update.folder_bytes, None);
         assert_eq!(update.browsable, ["shop"]);
         assert_eq!(update.repliable, ["shop"]);
 

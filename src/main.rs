@@ -8,28 +8,40 @@ mod board;
 mod channels;
 mod config;
 mod inbox;
+mod notice;
 mod signin;
+mod usage;
 mod vault;
 mod window;
 mod worker;
 
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
 use glasskit::events::{Event, EventLoop};
+use glasskit::tray::{Icon, MenuItem, Tray};
 use nexo_core::{Engine, Folder};
 
 use accounts::{Accounts, Context as Cx};
 use board::BoardAction;
 use config::Config;
 use inbox::InboxAction;
+use usage::Usage;
 use window::{Action, MainWindow, View};
 use worker::{Outcome, Worker};
 
 const APP_NAME: &str = "nexo";
 const CONFIG_FILE: &str = "config.toml";
 const BOARD_FILE: &str = "board.json";
+const USAGE_FILE: &str = "usage.json";
+
+/// A command of the menu of the notification area.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Command {
+    Open,
+    SyncNow,
+}
 
 const USAGE: &str = "\
 Usage: nexo [--once]
@@ -59,7 +71,7 @@ fn run() -> Result<()> {
     };
 
     let Some(_instance) = glasskit::single_instance("nexo.SingleInstance")? else {
-        bail!("nexo is already running.");
+        bail!("nexo is already running. Its icon is in the notification area.");
     };
 
     let app_dir = app_dir()?;
@@ -93,7 +105,7 @@ fn run_window(
     mut accounts: Accounts,
 ) -> Result<()> {
     let ui = glasskit::Ui::new()?;
-    let mut events: EventLoop<()> = EventLoop::new(&ui)?;
+    let mut events: EventLoop<Command> = EventLoop::new(&ui)?;
     let waker = events.waker();
     let browsable: Vec<String> = engine.browsable().map(str::to_owned).collect();
     let repliable: Vec<String> = engine.repliable().map(str::to_owned).collect();
@@ -101,18 +113,34 @@ fn run_window(
     let mut autostart = glasskit::autostart::is_enabled(APP_NAME);
     let board_path = config_path.with_file_name(BOARD_FILE);
     let mut window = MainWindow::new(&ui, &config, &board_path, autostart)?;
+    let mut tray = Tray::new(&events, APP_NAME, &window::app_icon(Icon::tray_size())?)?;
+    tray.set_menu(&[
+        MenuItem::command(Command::Open, "Open nexo"),
+        MenuItem::command(Command::SyncNow, "Sync now"),
+        MenuItem::Separator,
+        MenuItem::Quit("Quit".into()),
+    ]);
+    tray.set_click(Some(Command::Open));
+    window.show();
+    let mut usage = Usage::load(&config_path.with_file_name(USAGE_FILE));
     accounts.start(events.waker());
     accounts.show(&mut window, &config);
     if let Some(action) = window.set_channels(&browsable, &repliable) {
         act(action, &mut worker)?;
     }
-    let mut view = View::default();
+    let mut view = View {
+        total: usage.total,
+        since: usage.since(),
+        ..View::default()
+    };
     let mut shown = None;
-    let mut board = None;
+    let mut board: Option<Vec<nexo_core::Card>> = None;
     let mut next_sync = SystemTime::now();
+    let mut sync_started = Instant::now();
     loop {
         if !worker.is_syncing() && SystemTime::now() >= next_sync {
             worker.sync()?;
+            sync_started = Instant::now();
         }
         let cx = Cx {
             worker: &mut worker,
@@ -126,7 +154,20 @@ fn run_window(
         while let Some(update) = worker.poll()? {
             match update.outcome {
                 Outcome::Synced(report) => {
-                    view.last = Some((now_hhmm(), report));
+                    if let Err(err) = usage.record(&report) {
+                        eprintln!("{err:#}");
+                    }
+                    let time = now_hhmm();
+                    tray.set_tooltip(&format!("nexo - {}", window::summary(&report, &time)));
+                    if config.notify && report.received > 0 {
+                        let (title, text) =
+                            notice::new_messages(report.received, board.as_deref(), &update.board);
+                        tray.notify(&title, &text);
+                    }
+                    view.took = Some(sync_started.elapsed());
+                    view.session = usage.session;
+                    view.total = usage.total;
+                    view.last = Some((time, report));
                     next_sync = SystemTime::now() + config.interval().duration();
                 }
                 Outcome::Changed => {}
@@ -140,6 +181,10 @@ fn run_window(
                     }
                 }
             }
+            if update.folder_bytes.is_some() {
+                view.folder_bytes = update.folder_bytes;
+            }
+            view.conversations = update.board.len();
             if board.as_ref() != Some(&update.board) {
                 window.set_board(&update.board);
                 board = Some(update.board);
@@ -189,6 +234,16 @@ fn run_window(
                                 glasskit::show_error(APP_NAME, &format!("{err:#}"));
                             }
                         }
+                        Action::SetTray(on) => {
+                            if let Err(err) = config.save_tray(config_path, on) {
+                                glasskit::show_error(APP_NAME, &format!("{err:#}"));
+                            }
+                        }
+                        Action::SetNotify(on) => {
+                            if let Err(err) = config.save_notify(config_path, on) {
+                                glasskit::show_error(APP_NAME, &format!("{err:#}"));
+                            }
+                        }
                         Action::Board(BoardAction::Open(dir)) => open_folder(&dir),
                         Action::Channels(action) => {
                             let cx = Cx {
@@ -203,10 +258,13 @@ fn run_window(
                         @ (Action::Board(BoardAction::SetDone { .. }) | Action::Inbox(_)) => {
                             act(action, &mut worker)?;
                         }
+                        Action::Close if config.tray => window.hide(),
                         Action::Close => return Ok(()),
                     }
                 }
             }
+            Event::Command(Command::Open) => window.show(),
+            Event::Command(Command::SyncNow) => next_sync = SystemTime::now(),
             Event::Quit => return Ok(()),
             _ => {}
         }

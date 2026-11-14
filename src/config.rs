@@ -179,6 +179,16 @@ pub struct Config {
     /// Read the notification emails of LinkedIn in the Gmail of the user.
     #[serde(default)]
     pub linkedin: bool,
+    /// The close button of the window keeps nexo in the notification area.
+    #[serde(default = "yes")]
+    pub tray: bool,
+    /// Show a notification when a sync brings new messages.
+    #[serde(default = "yes")]
+    pub notify: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn default_sync_every() -> u64 {
@@ -206,6 +216,8 @@ impl Config {
             look: Look::default(),
             side: Side::default(),
             linkedin: false,
+            tray: true,
+            notify: true,
         })
     }
 
@@ -251,6 +263,18 @@ impl Config {
     pub fn save_look(&mut self, path: &Path, look: Look) -> Result<()> {
         save_values(path, &[("look", toml_edit::value(look.name()))])?;
         self.look = look;
+        Ok(())
+    }
+
+    pub fn save_tray(&mut self, path: &Path, on: bool) -> Result<()> {
+        save_values(path, &[("tray", toml_edit::value(on))])?;
+        self.tray = on;
+        Ok(())
+    }
+
+    pub fn save_notify(&mut self, path: &Path, on: bool) -> Result<()> {
+        save_values(path, &[("notify", toml_edit::value(on))])?;
+        self.notify = on;
         Ok(())
     }
 
@@ -426,6 +450,19 @@ mod tests {
             assert_eq!(toml::from_str::<Config>(&saved).unwrap().side, side);
         }
         assert!(toml::from_str::<Config>(&format!("{OUTPUT}side = \"wide\"")).is_err());
+    }
+
+    #[test]
+    fn the_tray_and_the_notifications_are_on_unless_the_file_says_more() {
+        let config: Config = toml::from_str(OUTPUT).unwrap();
+        assert!(config.tray && config.notify);
+        let values = [
+            ("tray", toml_edit::value(false)),
+            ("notify", toml_edit::value(false)),
+        ];
+        let saved = with_values(OUTPUT, &values).unwrap();
+        let config: Config = toml::from_str(&saved).unwrap();
+        assert!(!config.tray && !config.notify);
     }
 
     #[test]

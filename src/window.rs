@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::Result;
 use glasskit::Ui;
@@ -18,20 +19,25 @@ use crate::board::{Board, BoardAction};
 use crate::channels::{Channels, ChannelsAction, EmailState, GmailState, TelegramState};
 use crate::config::{Config, Interval, Look, Side, Unit};
 use crate::inbox::{Inbox, InboxAction};
+use crate::usage::{Counts, size_words};
 
 const SIDE_WIDTH: f32 = 208.0;
 const ICON_SIZE: u32 = 64;
 const INTERVAL_HINT: &str = "Type a number from 1, and pick seconds or minutes.";
 const LOOK_HINT: &str = "How much of the desktop shows through the window.";
 const SIDE_HINT: &str = "The list of pages at the left: with names, or only icons.";
+const TRAY_HINT: &str = "In the notification area, nexo syncs and tells you about new messages.";
+const NOTIFY_HINT: &str = "A notification of Windows when a sync brings new messages.";
 /// The pages of the side list, each with its icon in Segoe Fluent Icons.
-const PAGES: [(&str, &str); 5] = [
+const PAGES: [(&str, &str); 4] = [
     ("Overview", "\u{E80F}"),
     ("Inbox", "\u{E715}"),
     ("Board", "\u{E8A9}"),
-    ("Channels", "\u{E71B}"),
     ("Settings", "\u{E713}"),
 ];
+/// The groups of the settings page.
+const GROUPS: [&str; 4] = ["General", "Sync and data", "Appearance", "Channels"];
+const COUNTS: [&str; 4] = ["Syncs", "New messages", "Replies sent", "Problems"];
 
 /// What the user asked for in the window.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,18 +48,32 @@ pub enum Action {
     SetInterval(Interval),
     SetLook(Look),
     SetSide(Side),
+    /// Keep nexo in the notification area when the window closes, or stop it.
+    SetTray(bool),
+    SetNotify(bool),
     Board(BoardAction),
     Inbox(InboxAction),
     Channels(ChannelsAction),
     Close,
 }
 
-/// What the overview page shows.
+/// What the overview page and the sync group of the settings show.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct View {
     pub syncing: bool,
     /// The clock time of the last sync, such as `14:05`, and its report.
     pub last: Option<(String, Report)>,
+    /// How long the last sync took.
+    pub took: Option<Duration>,
+    /// The syncs of this run of nexo, and of all runs.
+    pub session: Counts,
+    pub total: Counts,
+    /// The day of the first sync of all runs, such as `2026-11-14`.
+    pub since: String,
+    /// The number of conversations in the output folder.
+    pub conversations: usize,
+    /// The size of the output folder.
+    pub folder_bytes: Option<u64>,
 }
 
 impl View {
@@ -76,6 +96,16 @@ impl View {
         }
     }
 
+    /// The time of the last sync, and how long it took.
+    fn timing(&self) -> String {
+        match self.took {
+            Some(took) if self.last.is_some() => {
+                format!("{}, in {:.1} s", self.detail(), took.as_secs_f64())
+            }
+            _ => self.detail(),
+        }
+    }
+
     /// New messages, sent replies, and problems of the last sync.
     fn counts(&self) -> [usize; 3] {
         self.last.as_ref().map_or([0; 3], |(_, report)| {
@@ -88,6 +118,22 @@ impl View {
             .as_ref()
             .map(|(_, report)| report.problems.join("\n"))
             .unwrap_or_default()
+    }
+
+    fn total_title(&self) -> String {
+        format!("All syncs since {}", self.since)
+    }
+
+    /// What the output folder holds.
+    fn stored(&self) -> String {
+        let conversations = match self.conversations {
+            1 => "1 conversation".to_owned(),
+            n => format!("{n} conversations"),
+        };
+        match self.folder_bytes {
+            Some(bytes) => format!("{conversations}, {} on the disk", size_words(bytes)),
+            None => format!("{conversations}. The size shows after the first sync."),
+        }
     }
 }
 
@@ -105,22 +151,30 @@ pub fn summary(report: &Report, time: &str) -> String {
     format!("Synced at {time}: {}", parts.join(", "))
 }
 
-/// An item of the side list, and the page that it shows.
+/// An item of a list of pages, and the page that it shows.
 struct Tab {
     item: Id<kind::NavItem>,
-    page: Id<kind::Column>,
+    page: AnyId,
 }
 
 pub struct MainWindow {
     window: Window,
     ui: Ui,
     tabs: Vec<Tab>,
-    headline: Id<kind::Text>,
+    /// The groups of the settings page.
+    groups: Vec<Tab>,
+    /// The state of the sync, on the overview page and in the settings.
+    headlines: [Id<kind::Text>; 2],
     detail: Id<kind::Text>,
+    timing: Id<kind::Text>,
     counts: [Id<kind::Text>; 3],
+    session: [Id<kind::Text>; 4],
+    total_title: Id<kind::Text>,
+    total: [Id<kind::Text>; 4],
+    stored: Id<kind::Text>,
     problems_card: Id<kind::Card>,
     problems: Id<kind::Text>,
-    sync: Id<kind::Button>,
+    syncs: [Id<kind::Button>; 2],
     open: Id<kind::Button>,
     autostart: Id<kind::Button>,
     autostart_state: Id<kind::Text>,
@@ -133,6 +187,8 @@ pub struct MainWindow {
     look: Look,
     sides: [(Id<kind::NavItem>, Side); 2],
     side: Side,
+    trays: [(Id<kind::NavItem>, bool); 2],
+    notifies: [(Id<kind::NavItem>, bool); 2],
     bar: Id<kind::SideBar>,
     board: Board,
     inbox: Inbox,
@@ -148,17 +204,7 @@ impl MainWindow {
         let detail = w.add(Text::new("No sync yet").style(TextStyle::Caption));
         let sync = w.add(Button::new("Sync now").accent());
         let status = setting(&mut w, headline, detail, &[sync.into()]);
-        let counts = [(); 3].map(|()| w.add(Text::new("0").style(TextStyle::Title)));
-        let stats: Vec<Id<kind::Card>> = ["New messages", "Replies sent", "Problems"]
-            .into_iter()
-            .zip(counts)
-            .map(|(label, count)| {
-                let label = w.add(Text::new(label).style(TextStyle::Caption));
-                let lines = w.add(Column::new().gap(2.0).child(count).child(label));
-                w.add(Card::new().width(Length::Fill(1.0)).child(lines))
-            })
-            .collect();
-        let stats = w.add(Row::new().gap(12.0).align(Align::Stretch).children(stats));
+        let (last_stats, counts) = stats(&mut w, ["New messages", "Replies sent", "Problems"]);
         let problems_title = w.add(Text::new("Problems").style(TextStyle::BodyStrong));
         let problems = w.add(Text::new(""));
         let lines = w.add(Column::new().gap(8.0).child(problems_title).child(problems));
@@ -167,7 +213,7 @@ impl MainWindow {
         let overview = page(
             &mut w,
             "Overview",
-            vec![status.into(), stats.into(), problems_card.into()],
+            vec![status.into(), last_stats.into(), problems_card.into()],
         );
 
         let (board, lanes) = Board::build(&mut w, board)?;
@@ -177,14 +223,53 @@ impl MainWindow {
         let (inbox, list) = Inbox::build(&mut w);
         let inbox_page = framed(&mut w, "Inbox", list.into());
 
-        let (channels, cards) = Channels::build(&mut w);
-        let channels_page = page(&mut w, "Channels", cards);
-
         let folder_title = w.add(Text::new("Output folder"));
         let folder =
             w.add(Text::new(config.output.display().to_string()).style(TextStyle::Caption));
         let open = w.add(Button::new("Open folder"));
         let folder = setting(&mut w, folder_title, folder, &[open.into()]);
+        let autostart_title = w.add(Text::new("Start with Windows"));
+        let autostart_state = w.add(Text::new("").style(TextStyle::Caption));
+        let autostart_button = w.add(Button::new(""));
+        let startup = setting(
+            &mut w,
+            autostart_title,
+            autostart_state,
+            &[autostart_button.into()],
+        );
+        let (tray, trays) = choice(
+            &mut w,
+            "When you close the window",
+            TRAY_HINT,
+            [("Keep in tray", true), ("Exit", false)],
+        );
+        let (notify, notifies) = choice(
+            &mut w,
+            "Notifications",
+            NOTIFY_HINT,
+            [("On", true), ("Off", false)],
+        );
+        let how = w.add(
+            Text::new(
+                "To change the folder, edit config.toml next to the app, then start nexo again.",
+            )
+            .style(TextStyle::Caption),
+        );
+        let general = scroll(
+            &mut w,
+            vec![
+                folder.into(),
+                startup.into(),
+                tray.into(),
+                notify.into(),
+                how.into(),
+            ],
+        );
+
+        let sync_headline = w.add(Text::new("Starting"));
+        let timing = w.add(Text::new("No sync yet").style(TextStyle::Caption));
+        let sync_again = w.add(Button::new("Sync now").accent());
+        let sync_status = setting(&mut w, sync_headline, timing, &[sync_again.into()]);
         let interval = config.interval();
         let interval_title = w.add(Text::new(interval.describe()));
         let interval_note = w.add(Text::new(INTERVAL_HINT).style(TextStyle::Caption));
@@ -200,52 +285,56 @@ impl MainWindow {
             interval_note,
             &[interval_box.into(), units[0].0.into(), units[1].0.into()],
         );
-        let look_title = w.add(Text::new("Window background"));
-        let look_note = w.add(Text::new(LOOK_HINT).style(TextStyle::Caption));
-        let looks = Look::ALL.map(|look| (w.add(NavItem::new(look.label())), look));
-        let look = setting(
+        let session_title = w.add(Text::new("This session").style(TextStyle::BodyStrong));
+        let (session_stats, session) = stats(&mut w, COUNTS);
+        let total_title = w.add(Text::new("All syncs").style(TextStyle::BodyStrong));
+        let (total_stats, total) = stats(&mut w, COUNTS);
+        let stored_title = w.add(Text::new("Stored data"));
+        let stored = w.add(Text::new("").style(TextStyle::Caption));
+        let stored_card = setting(&mut w, stored_title, stored, &[]);
+        let sync_group = scroll(
             &mut w,
-            look_title,
-            look_note,
-            &looks.map(|(item, _)| item.into()),
-        );
-        w.set_material(config.look.material());
-        let side_title = w.add(Text::new("Side list"));
-        let side_note = w.add(Text::new(SIDE_HINT).style(TextStyle::Caption));
-        let sides = Side::ALL.map(|side| (w.add(NavItem::new(side.label())), side));
-        let side_setting = setting(
-            &mut w,
-            side_title,
-            side_note,
-            &sides.map(|(item, _)| item.into()),
-        );
-        let autostart_title = w.add(Text::new("Start with Windows"));
-        let autostart_state = w.add(Text::new("").style(TextStyle::Caption));
-        let autostart_button = w.add(Button::new(""));
-        let startup = setting(
-            &mut w,
-            autostart_title,
-            autostart_state,
-            &[autostart_button.into()],
-        );
-        let how = w.add(
-            Text::new(
-                "To change the folder, edit config.toml next to the app, then start nexo again.",
-            )
-            .style(TextStyle::Caption),
-        );
-        let settings = page(
-            &mut w,
-            "Settings",
             vec![
-                folder.into(),
+                sync_status.into(),
                 schedule.into(),
-                look.into(),
-                side_setting.into(),
-                startup.into(),
-                how.into(),
+                session_title.into(),
+                session_stats.into(),
+                total_title.into(),
+                total_stats.into(),
+                stored_card.into(),
             ],
         );
+
+        let (look, looks) = choice(
+            &mut w,
+            "Window background",
+            LOOK_HINT,
+            Look::ALL.map(|look| (look.label(), look)),
+        );
+        w.set_material(config.look.material());
+        let (side_setting, sides) = choice(
+            &mut w,
+            "Side list",
+            SIDE_HINT,
+            Side::ALL.map(|side| (side.label(), side)),
+        );
+        let appearance = scroll(&mut w, vec![look.into(), side_setting.into()]);
+
+        let (channels, cards) = Channels::build(&mut w);
+        let channels_group = scroll(&mut w, cards);
+
+        let group_items = GROUPS.map(|name| w.add(NavItem::new(name)));
+        let group_row = w.add(Row::new().gap(4.0).children(group_items));
+        let group_pages = [general, sync_group, appearance, channels_group];
+        let group_stack = w.add(Stack::new().height(Length::Fill(1.0)).children(group_pages));
+        let groups = w.add(
+            Column::new()
+                .gap(12.0)
+                .height(Length::Fill(1.0))
+                .child(group_row)
+                .child(group_stack),
+        );
+        let settings = framed(&mut w, "Settings", groups.into());
 
         let items = PAGES.map(|(name, icon)| w.add(NavItem::new(name).icon(icon)));
         let gap = w.add(Spacer::fill());
@@ -256,11 +345,11 @@ impl MainWindow {
                 .mode(config.side.mode())
                 .modes(Side::ALL.map(Side::mode))
                 .gap(4.0)
-                .children(items[..4].iter().copied())
+                .children(items[..3].iter().copied())
                 .child(gap)
-                .child(items[4]),
+                .child(items[3]),
         );
-        let pages = [overview, inbox_page, board_page, channels_page, settings];
+        let pages = [overview, inbox_page, board_page, settings];
         let stack = w.add(Stack::new().width(Length::Fill(1.0)).children(pages));
         let root = w.add(
             Row::new()
@@ -272,20 +361,31 @@ impl MainWindow {
         );
         w.set_root(root);
 
+        let tab = |(item, page): (Id<kind::NavItem>, AnyId)| Tab { item, page };
         let mut this = Self {
             window: w,
             ui: ui.clone(),
             tabs: items
                 .into_iter()
-                .zip(pages)
-                .map(|(item, page)| Tab { item, page })
+                .zip(pages.map(AnyId::from))
+                .map(tab)
                 .collect(),
-            headline,
+            groups: group_items
+                .into_iter()
+                .zip(group_pages.map(AnyId::from))
+                .map(tab)
+                .collect(),
+            headlines: [headline, sync_headline],
             detail,
+            timing,
             counts,
+            session,
+            total_title,
+            total,
+            stored,
             problems_card,
             problems,
-            sync,
+            syncs: [sync, sync_again],
             open,
             autostart: autostart_button,
             autostart_state,
@@ -298,6 +398,8 @@ impl MainWindow {
             look: config.look,
             sides,
             side: config.side,
+            trays,
+            notifies,
             bar,
             board,
             inbox,
@@ -306,11 +408,23 @@ impl MainWindow {
         this.show_unit();
         this.show_look();
         this.show_side();
+        this.set_tray(config.tray);
+        this.set_notify(config.notify);
         this.show_tab(0);
+        this.show_group(0);
         this.set_autostart(autostart);
         this.window.set_icon(&app_icon(ICON_SIZE)?)?;
-        this.window.show();
         Ok(this)
+    }
+
+    /// Show the window, and bring it to the front.
+    pub fn show(&self) {
+        self.window.show();
+    }
+
+    /// Hide the window. nexo goes on in the notification area.
+    pub fn hide(&self) {
+        self.window.hide();
     }
 
     pub fn id(&self) -> WindowId {
@@ -318,16 +432,28 @@ impl MainWindow {
     }
 
     pub fn set_view(&mut self, view: &View) {
-        self.window.set_text(self.headline, &view.headline());
+        for headline in self.headlines {
+            self.window.set_text(headline, &view.headline());
+        }
         self.window.set_text(self.detail, &view.detail());
+        self.window.set_text(self.timing, &view.timing());
         for (id, count) in self.counts.into_iter().zip(view.counts()) {
             self.window.set_text(id, &count.to_string());
         }
+        for (ids, counts) in [(self.session, view.session), (self.total, view.total)] {
+            for (id, count) in ids.into_iter().zip(counts.values()) {
+                self.window.set_text(id, &count.to_string());
+            }
+        }
+        self.window.set_text(self.total_title, &view.total_title());
+        self.window.set_text(self.stored, &view.stored());
         let problems = view.problems();
         self.window.set_text(self.problems, &problems);
         self.window
             .set_visible(self.problems_card, !problems.is_empty());
-        self.window.set_enabled(self.sync, !view.syncing);
+        for sync in self.syncs {
+            self.window.set_enabled(sync, !view.syncing);
+        }
     }
 
     /// Show these conversations on the board.
@@ -392,6 +518,18 @@ impl MainWindow {
         self.window.set_text(self.autostart, label);
     }
 
+    pub fn set_tray(&mut self, on: bool) {
+        for (item, value) in self.trays {
+            self.window.set_selected(item, value == on);
+        }
+    }
+
+    pub fn set_notify(&mut self, on: bool) {
+        for (item, value) in self.notifies {
+            self.window.set_selected(item, value == on);
+        }
+    }
+
     /// The actions that the user took since the last call.
     pub fn actions(&mut self) -> Vec<Action> {
         let mut actions = Vec::new();
@@ -402,14 +540,24 @@ impl MainWindow {
             }
             match event {
                 WindowEvent::Clicked(id) => {
-                    self.board.clicked(&mut self.window, id);
+                    if let Err(err) = self.board.clicked(&self.ui, &mut self.window, id) {
+                        glasskit::show_error("nexo", &format!("{err:#}"));
+                    }
                     if let Some(tab) = self.tabs.iter().position(|t| id == t.item) {
                         self.show_tab(tab);
+                    } else if let Some(group) = self.groups.iter().position(|t| id == t.item) {
+                        self.show_group(group);
+                    } else if let Some(&(_, on)) = self.trays.iter().find(|(t, _)| id == *t) {
+                        self.set_tray(on);
+                        actions.push(Action::SetTray(on));
+                    } else if let Some(&(_, on)) = self.notifies.iter().find(|(n, _)| id == *n) {
+                        self.set_notify(on);
+                        actions.push(Action::SetNotify(on));
                     } else if let Some(&(_, side)) = self.sides.iter().find(|(s, _)| id == *s) {
                         self.side = side;
                         self.show_side();
                         actions.push(Action::SetSide(side));
-                    } else if id == self.sync {
+                    } else if self.syncs.iter().any(|sync| id == *sync) {
                         actions.push(Action::SyncNow);
                     } else if id == self.open {
                         actions.push(Action::OpenFolder);
@@ -492,15 +640,30 @@ impl MainWindow {
     }
 
     fn show_tab(&mut self, shown: usize) {
-        for (i, tab) in self.tabs.iter().enumerate() {
-            self.window.set_selected(tab.item, i == shown);
-            self.window.set_visible(tab.page, i == shown);
-        }
+        show_one(&mut self.window, &self.tabs, shown);
+    }
+
+    fn show_group(&mut self, shown: usize) {
+        show_one(&mut self.window, &self.groups, shown);
+    }
+}
+
+/// Show the page of one tab, and mark its item.
+fn show_one(w: &mut Window, tabs: &[Tab], shown: usize) {
+    for (i, tab) in tabs.iter().enumerate() {
+        w.set_selected(tab.item, i == shown);
+        w.set_visible(tab.page, i == shown);
     }
 }
 
 /// A page: a title, then its parts from the top. The parts scroll if the window is short.
 fn page(w: &mut Window, title: &str, parts: Vec<AnyId>) -> Id<kind::Column> {
+    let body = scroll(w, parts);
+    framed(w, title, body.into())
+}
+
+/// Parts from the top, which scroll if the window is short.
+fn scroll(w: &mut Window, parts: Vec<AnyId>) -> Id<kind::Scroll> {
     // Space at the right keeps the parts clear of the scroll bar.
     let clear = Insets {
         left: 0.0,
@@ -508,8 +671,40 @@ fn page(w: &mut Window, title: &str, parts: Vec<AnyId>) -> Id<kind::Column> {
         right: 10.0,
         bottom: 0.0,
     };
-    let body = w.add(Scroll::new().gap(12.0).padding(clear).children(parts));
-    framed(w, title, body.into())
+    w.add(Scroll::new().gap(12.0).padding(clear).children(parts))
+}
+
+/// A row of cards, each with a number and its label, and the texts of the numbers.
+fn stats<const N: usize>(
+    w: &mut Window,
+    labels: [&str; N],
+) -> (Id<kind::Row>, [Id<kind::Text>; N]) {
+    let counts = labels.map(|_| w.add(Text::new("0").style(TextStyle::Title)));
+    let cards: Vec<Id<kind::Card>> = labels
+        .into_iter()
+        .zip(counts)
+        .map(|(label, count)| {
+            let label = w.add(Text::new(label).style(TextStyle::Caption));
+            let lines = w.add(Column::new().gap(2.0).child(count).child(label));
+            w.add(Card::new().width(Length::Fill(1.0)).child(lines))
+        })
+        .collect();
+    let row = w.add(Row::new().gap(12.0).align(Align::Stretch).children(cards));
+    (row, counts)
+}
+
+/// A setting with one item for each value, of which one is selected.
+fn choice<T: Copy, const N: usize>(
+    w: &mut Window,
+    title: &str,
+    note: &str,
+    values: [(&str, T); N],
+) -> (Id<kind::Card>, [(Id<kind::NavItem>, T); N]) {
+    let title = w.add(Text::new(title));
+    let note = w.add(Text::new(note).style(TextStyle::Caption));
+    let items = values.map(|(label, value)| (w.add(NavItem::new(label)), value));
+    let card = setting(w, title, note, &items.map(|(item, _)| item.into()));
+    (card, items)
 }
 
 /// A page: a title, then a body that fills the rest of the page.
@@ -529,8 +724,8 @@ fn framed(w: &mut Window, title: &str, body: AnyId) -> Id<kind::Column> {
     )
 }
 
-/// Two rings that link, in blue: the icon of the window.
-fn app_icon(size: u32) -> glasskit::Result<Icon> {
+/// Two rings that link, in blue: the icon of the window and of the notification area.
+pub fn app_icon(size: u32) -> glasskit::Result<Icon> {
     let s = size as f32;
     let centers = [(s * 0.36, s * 0.5), (s * 0.64, s * 0.5)];
     let (outer, inner) = (s * 0.30, s * 0.18);
@@ -609,6 +804,11 @@ mod tests {
         let mut view = View::default();
         assert_eq!(view.headline(), "Starting");
         assert_eq!(view.detail(), "No sync yet");
+        assert_eq!(view.timing(), "No sync yet");
+        assert_eq!(
+            view.stored(),
+            "0 conversations. The size shows after the first sync."
+        );
         assert_eq!(view.counts(), [0, 0, 0]);
         view.syncing = true;
         assert_eq!(view.headline(), "Syncing");
@@ -617,20 +817,27 @@ mod tests {
     #[test]
     fn view_after_a_sync() {
         let good = View {
-            syncing: false,
             last: Some(("14:05".into(), report(3, 1, &[]))),
+            took: Some(Duration::from_millis(1240)),
+            since: "2026-11-14".into(),
+            conversations: 1,
+            folder_bytes: Some(2048),
+            ..View::default()
         };
+        assert_eq!(good.timing(), "Last sync at 14:05, in 1.2 s");
+        assert_eq!(good.total_title(), "All syncs since 2026-11-14");
+        assert_eq!(good.stored(), "1 conversation, 2.0 KB on the disk");
         assert_eq!(good.headline(), "Up to date");
         assert_eq!(good.detail(), "Last sync at 14:05");
         assert_eq!(good.counts(), [3, 1, 0]);
         assert_eq!(good.problems(), "");
 
         let bad = View {
-            syncing: false,
             last: Some((
                 "14:05".into(),
                 report(0, 0, &["chat: offline", "mail: no key"]),
             )),
+            ..View::default()
         };
         assert_eq!(bad.headline(), "2 problems");
         assert_eq!(bad.counts(), [0, 0, 2]);

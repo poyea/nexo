@@ -13,6 +13,7 @@ use glasskit::window::{Window, WindowEvent};
 use nexo_core::{Card as Conversation, Stage};
 use serde::{Deserialize, Serialize};
 
+/// The lanes of the stages of a conversation. The user can add more lanes after them.
 const LANES: [&str; 3] = ["To do", "Waiting", "Done"];
 const MAX_TITLE_CHARS: usize = 60;
 
@@ -28,7 +29,7 @@ pub enum BoardAction {
     },
 }
 
-/// The board as the file keeps it: the colors of the lanes, and the tasks of the user.
+/// The board as the file keeps it: the lanes, and the tasks of the user in them.
 /// The conversations are not in the file.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 struct Saved {
@@ -38,6 +39,9 @@ struct Saved {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 struct SavedLane {
+    /// A lane without a name has the name of its stage.
+    #[serde(default)]
+    name: Option<String>,
     #[serde(default)]
     color: Option<String>,
     #[serde(default)]
@@ -61,6 +65,7 @@ struct SavedCard {
 pub struct Board {
     lanes: Lanes,
     path: PathBuf,
+    add_lane: Id<kind::Button>,
     archived: Id<kind::Button>,
     /// The card of each conversation.
     conversations: Vec<(CardKey, Conversation)>,
@@ -70,7 +75,22 @@ impl Board {
     /// Make the widgets with the tasks of the file, and give the column that holds them.
     pub fn build(w: &mut Window, path: &Path) -> Result<(Self, Id<kind::Column>)> {
         let mut lanes = Lanes::new(w, &LANES);
+        for lane in 0..LANES.len() {
+            lanes.set_lane_fixed(lane, true);
+        }
         for (lane, saved) in load(path)?.lanes.into_iter().enumerate() {
+            let name = saved
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|n| !n.is_empty());
+            match name {
+                _ if lane >= lanes.lane_count() => {
+                    lanes.add_lane(w, name.unwrap_or("Lane"));
+                }
+                Some(name) => lanes.set_lane_name(w, lane, name),
+                None => {}
+            }
             lanes.set_lane_tint(w, lane, tint(saved.color.as_deref()));
             for card in saved.cards {
                 let card = CardData {
@@ -85,8 +105,15 @@ impl Board {
             }
         }
         let gap = w.add(Spacer::fill());
+        let add_lane = w.add(Button::new("Add lane"));
         let archived = w.add(Button::new("Show archived"));
-        let bar = w.add(Row::new().child(gap).child(archived));
+        let bar = w.add(
+            Row::new()
+                .gap(8.0)
+                .child(gap)
+                .child(add_lane)
+                .child(archived),
+        );
         let column = w.add(
             Column::new()
                 .gap(8.0)
@@ -97,6 +124,7 @@ impl Board {
         let board = Self {
             lanes,
             path: path.to_owned(),
+            add_lane,
             archived,
             conversations: Vec::new(),
         };
@@ -141,8 +169,8 @@ impl Board {
         }
     }
 
-    /// What a click on this widget does, if the widget is the button of the page.
-    pub fn clicked(&mut self, w: &mut Window, clicked: AnyId) {
+    /// Do what a click on this widget asks for, if the widget is a button of the page.
+    pub fn clicked(&mut self, ui: &Ui, w: &mut Window, clicked: AnyId) -> Result<()> {
         if clicked == self.archived {
             let show = !self.lanes.show_archived();
             self.lanes.set_show_archived(w, show);
@@ -152,7 +180,10 @@ impl Board {
                 "Show archived"
             };
             w.set_text(self.archived, label);
+        } else if clicked == self.add_lane && self.lanes.add_lane_by_user(ui, w)?.is_some() {
+            self.save()?;
         }
+        Ok(())
     }
 
     /// Give an event of the window to the board. A change of a task goes to the file. The
@@ -207,6 +238,7 @@ impl Board {
     fn save(&self) -> Result<()> {
         let lanes = (0..self.lanes.lane_count())
             .map(|lane| SavedLane {
+                name: self.lanes.lane_name(lane).map(str::to_owned),
                 color: self.lanes.lane_tint(lane).map(color),
                 cards: self
                     .lanes
@@ -281,6 +313,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_lane_of_the_user_keeps_its_name_in_the_file() {
+        let saved = Saved {
+            lanes: vec![
+                SavedLane::default(),
+                SavedLane {
+                    name: Some("Ideas".into()),
+                    color: Some("teal".into()),
+                    cards: Vec::new(),
+                },
+            ],
+        };
+        let text = serde_json::to_string(&saved).unwrap();
+        assert_eq!(serde_json::from_str::<Saved>(&text).unwrap(), saved);
+    }
+
+    #[test]
     fn each_stage_has_a_lane() {
         let lanes = Stage::ALL.map(lane_of);
         assert_eq!(lanes, [0, 1, 2]);
@@ -324,6 +372,7 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         let saved = saved.unwrap();
         assert_eq!(saved.lanes.len(), 2);
+        assert_eq!(saved.lanes[0].name, None);
         assert_eq!(tint(saved.lanes[0].color.as_deref()), Some(Tint::Blue));
         assert_eq!(saved.lanes[0].cards[0].title, "Plan");
         assert_eq!(saved.lanes[0].cards[0].color, None);
