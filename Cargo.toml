@@ -33,7 +33,7 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
-glasskit = "0.10"
+glasskit = "0.11"
 keyring-core = "1"
 nexo-core = { path = "crates/core" }
 nexo-gmail = { path = "crates/gmail" }
