@@ -103,6 +103,14 @@ impl Engine {
             .map(|s| s.channel())
     }
 
+    /// The channels that can send replies.
+    pub fn repliable(&self) -> impl Iterator<Item = &str> {
+        self.sources
+            .iter()
+            .filter(|s| s.can_reply())
+            .map(|s| s.channel())
+    }
+
     /// One page of the conversations of a channel. See [`Source::browse`].
     pub fn browse(&mut self, channel: &str, query: &str, page: Option<&str>) -> Result<Page> {
         let mut found = self.source(channel)?.browse(query, page)?;
@@ -124,6 +132,26 @@ impl Engine {
         let update = self.source(channel)?.load(id)?;
         self.folder.merge(channel, &update)?;
         Ok(())
+    }
+
+    /// Send a reply in the conversation `id` now, and keep it in the folder. A
+    /// conversation that is not in the folder goes there first.
+    pub fn reply(&mut self, channel: &str, id: &str, body: &str) -> Result<()> {
+        let body = body.trim();
+        if body.is_empty() {
+            bail!("the reply is empty");
+        }
+        if !self.source(channel)?.can_reply() {
+            bail!("{channel} cannot send replies");
+        }
+        if !self.folder.has(channel, id) {
+            self.track(channel, id)?;
+        }
+        let conversation = self.folder.conversation(channel, id)?;
+        let message = self.source(channel)?.reply(&conversation, body)?;
+        self.folder
+            .add_sent(channel, &conversation, &message)
+            .context("the reply went out, but nexo could not keep it")
     }
 
     fn source(&mut self, channel: &str) -> Result<&mut Box<dyn Source>> {
@@ -217,6 +245,7 @@ mod tests {
     use anyhow::anyhow;
 
     use super::*;
+    use crate::board::Stage;
     use crate::folder::files;
     use crate::folder::tests::{TempDir, conversation, message};
     use crate::model::{Conversation, Direction, Message, Summary};
@@ -470,6 +499,43 @@ mod tests {
         assert_eq!(*fake.tracked.lock().unwrap(), ["t1"]);
         assert!(engine.track("mail", "no-such").is_err());
         assert!(engine.browse("chat", "", None).is_err());
+    }
+
+    #[test]
+    fn a_reply_from_the_app_goes_out_at_once() {
+        let tmp = TempDir::new("engine-reply");
+        let listed = vec![(conversation("c1", "Jane"), message("m1", 0, "Hi"))];
+        let chat = Fake {
+            name: "chat",
+            listed: listed.clone(),
+            replies: true,
+            ..Fake::default()
+        };
+        let feed = Fake {
+            name: "feed",
+            listed,
+            ..Fake::default()
+        };
+        let mut engine = Engine::new(Folder::open(&tmp.0).unwrap()).unwrap();
+        engine.add(Box::new(chat.clone())).unwrap();
+        engine.add(Box::new(feed)).unwrap();
+        assert_eq!(engine.repliable().collect::<Vec<_>>(), ["chat"]);
+
+        engine.reply("chat", "c1", " Hello ").unwrap();
+        assert_eq!(*chat.sent.lock().unwrap(), ["Hello"]);
+        let board = engine.board();
+        assert_eq!(board.len(), 1);
+        assert_eq!(board[0].stage, Stage::Waiting);
+        let dir = only_dir(&tmp.0, "chat");
+        let transcript = std::fs::read_to_string(dir.join(files::TRANSCRIPT)).unwrap();
+        assert!(transcript.contains("Hi") && transcript.contains("Hello"));
+        assert_eq!(engine.sync().sent, 0);
+
+        assert!(engine.reply("chat", "c1", "  ").is_err());
+        let why = engine.reply("feed", "c1", "Hello").unwrap_err();
+        assert!(why.to_string().contains("cannot send"));
+        assert!(!engine.folder().has("feed", "c1"));
+        assert!(engine.reply("chat", "c9", "Hello").is_err());
     }
 
     #[test]

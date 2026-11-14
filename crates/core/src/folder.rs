@@ -222,18 +222,41 @@ impl Folder {
         Ok(replies)
     }
 
-    /// Keep the sent message, and remove the reply.
-    pub fn record_sent(&mut self, reply: &PendingReply, message: &Message) -> Result<()> {
+    /// The conversation `id` as the folder has it.
+    pub fn conversation(&self, channel: &str, id: &str) -> Result<Conversation> {
+        let entry = self
+            .known
+            .get(&(channel.to_owned(), id.to_owned()))
+            .with_context(|| format!("the folder has no conversation {id} of {channel}"))?;
+        read_conversation(&entry.dir)?
+            .with_context(|| format!("{} has no conversation", entry.dir.display()))
+    }
+
+    /// Keep a message that the user sent in a conversation of the folder.
+    pub fn add_sent(
+        &mut self,
+        channel: &str,
+        conversation: &Conversation,
+        message: &Message,
+    ) -> Result<()> {
+        let id = &conversation.id;
+        let entry = self
+            .known
+            .get_mut(&(channel.to_owned(), id.clone()))
+            .with_context(|| format!("the folder has no conversation {id} of {channel}"))?;
         let added = add_messages(
-            &reply.dir,
-            &reply.conversation,
+            &entry.dir,
+            conversation,
             std::slice::from_ref(message),
             false,
         )?;
-        let key = (reply.channel.clone(), reply.conversation.id.clone());
-        if let Some(entry) = self.known.get_mut(&key) {
-            entry.latest = added.latest;
-        }
+        entry.latest = added.latest;
+        Ok(())
+    }
+
+    /// Keep the sent message, and remove the reply.
+    pub fn record_sent(&mut self, reply: &PendingReply, message: &Message) -> Result<()> {
+        self.add_sent(&reply.channel, &reply.conversation, message)?;
         remove_if_there(&reply.dir.join(files::SEND))?;
         remove_if_there(&reply.dir.join(files::UNSENT_ERROR))
     }

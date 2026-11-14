@@ -95,12 +95,13 @@ fn run_window(
     let mut events: EventLoop<()> = EventLoop::new(&ui)?;
     let waker = events.waker();
     let browsable: Vec<String> = engine.browsable().map(str::to_owned).collect();
+    let repliable: Vec<String> = engine.repliable().map(str::to_owned).collect();
     let mut worker = Worker::spawn(engine, move || waker.wake())?;
     let mut autostart = glasskit::autostart::is_enabled(APP_NAME);
     let mut window = MainWindow::new(&ui, &config, autostart)?;
     accounts.start(events.waker());
     accounts.show(&mut window, &config);
-    if let Some(action) = window.set_browsable(&browsable) {
+    if let Some(action) = window.set_channels(&browsable, &repliable) {
         act(action, &mut worker)?;
     }
     let mut view = View::default();
@@ -131,12 +132,17 @@ fn run_window(
                 Outcome::Listed { tag, page } => window.show_listed(tag, page),
                 Outcome::Opened { id, conversation } => window.show_opened(&id, conversation),
                 Outcome::Tracked { id, result } => window.show_tracked(&id, &result),
+                Outcome::Replied { id, result } => {
+                    if let Some(action) = window.show_replied(&id, &result) {
+                        act(action, &mut worker)?;
+                    }
+                }
             }
             if board.as_ref() != Some(&update.board) {
                 window.set_board(&update.board);
                 board = Some(update.board);
             }
-            if let Some(action) = window.set_browsable(&update.browsable) {
+            if let Some(action) = window.set_channels(&update.browsable, &update.repliable) {
                 act(action, &mut worker)?;
             }
         }
@@ -219,6 +225,7 @@ fn act(action: Action, worker: &mut Worker) -> Result<()> {
         }) => worker.browse(channel, query, page, tag),
         Action::Inbox(InboxAction::Open { channel, id }) => worker.open(channel, id),
         Action::Inbox(InboxAction::Track { channel, id }) => worker.track(channel, id),
+        Action::Inbox(InboxAction::Reply { channel, id, body }) => worker.reply(channel, id, body),
         _ => Ok(()),
     }
 }

@@ -331,11 +331,11 @@ impl MainWindow {
         self.board.set(&mut self.window, cards);
     }
 
-    /// Tell the inbox which channels have a list of conversations. The action, if there is
-    /// one, loads the first page of a channel that is new.
-    pub fn set_browsable(&mut self, channels: &[String]) -> Option<Action> {
+    /// Tell the inbox which channels have a list of conversations, and which can send
+    /// replies. The action, if there is one, loads the first page of a channel that is new.
+    pub fn set_channels(&mut self, browsable: &[String], repliable: &[String]) -> Option<Action> {
         self.inbox
-            .set_channels(&mut self.window, channels)
+            .set_channels(&mut self.window, browsable, repliable)
             .map(Action::Inbox)
     }
 
@@ -352,6 +352,14 @@ impl MainWindow {
     /// Show in the inbox that a conversation went to the board, or did not.
     pub fn show_tracked(&mut self, id: &str, result: &Result<(), String>) {
         self.inbox.tracked(&mut self.window, id, result);
+    }
+
+    /// Show in the inbox that a reply went out, or did not. The action, if there is one,
+    /// loads the conversation again.
+    pub fn show_replied(&mut self, id: &str, result: &Result<(), String>) -> Option<Action> {
+        self.inbox
+            .replied(&mut self.window, id, result)
+            .map(Action::Inbox)
     }
 
     pub fn set_gmail(&mut self, state: &GmailState) {

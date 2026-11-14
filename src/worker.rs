@@ -28,6 +28,11 @@ enum Request {
         channel: String,
         id: String,
     },
+    Reply {
+        channel: String,
+        id: String,
+        body: String,
+    },
     Connect(Box<dyn Source>),
     Disconnect(String),
 }
@@ -55,6 +60,11 @@ pub enum Outcome {
         id: String,
         result: Result<(), String>,
     },
+    /// The reply went out, or the reason that it did not.
+    Replied {
+        id: String,
+        result: Result<(), String>,
+    },
 }
 
 /// What the engine has for the UI after a request.
@@ -65,6 +75,8 @@ pub struct Update {
     pub board: Vec<Card>,
     /// The channels that have a list of conversations to pick from.
     pub browsable: Vec<String>,
+    /// The channels that can send replies.
+    pub repliable: Vec<String>,
 }
 
 /// The engine on a thread of its own, so that slow channels do not stop the UI.
@@ -103,6 +115,10 @@ fn handle(engine: &mut Engine, request: Request) -> Outcome {
             result: engine.track(&channel, &id).map_err(words),
             id,
         },
+        Request::Reply { channel, id, body } => Outcome::Replied {
+            result: engine.reply(&channel, &id, &body).map_err(words),
+            id,
+        },
         Request::Connect(source) => {
             let channel = source.channel().to_owned();
             engine.remove(&channel);
@@ -129,6 +145,7 @@ impl Worker {
                         outcome: handle(&mut engine, request),
                         board: engine.board(),
                         browsable: engine.browsable().map(str::to_owned).collect(),
+                        repliable: engine.repliable().map(str::to_owned).collect(),
                     };
                     if done.send(update).is_err() {
                         return;
@@ -189,6 +206,11 @@ impl Worker {
     /// Put a conversation in the folder.
     pub fn track(&mut self, channel: String, id: String) -> Result<()> {
         self.send(Request::Track { channel, id })
+    }
+
+    /// Send a reply in a conversation now.
+    pub fn reply(&mut self, channel: String, id: String, body: String) -> Result<()> {
+        self.send(Request::Reply { channel, id, body })
     }
 
     /// Add a channel, in place of the one with the same name if there is one.
@@ -256,6 +278,20 @@ mod tests {
 
         fn can_browse(&self) -> bool {
             true
+        }
+
+        fn can_reply(&self) -> bool {
+            true
+        }
+
+        fn reply(&mut self, _: &Conversation, body: &str) -> Result<Message> {
+            Ok(Message {
+                id: "m2".into(),
+                author: "Me".into(),
+                sent_at: Utc.with_ymd_and_hms(2026, 11, 9, 12, 5, 0).unwrap(),
+                direction: Direction::Out,
+                body: body.into(),
+            })
         }
 
         fn browse(&mut self, _: &str, _: Option<&str>) -> Result<Page> {
@@ -364,6 +400,7 @@ mod tests {
         let update = f.next();
         assert_eq!(update.outcome, Outcome::Changed);
         assert_eq!(update.browsable, ["shop"]);
+        assert_eq!(update.repliable, ["shop"]);
 
         f.worker
             .browse("shop".into(), String::new(), None, 7)
@@ -397,6 +434,19 @@ mod tests {
             panic!("a track gives its result");
         };
         assert!(result.unwrap_err().contains("o2"));
+
+        f.worker
+            .reply("shop".into(), "o1".into(), "Thank you".into())
+            .unwrap();
+        let update = f.next();
+        assert_eq!(
+            update.outcome,
+            Outcome::Replied {
+                id: "o1".into(),
+                result: Ok(())
+            }
+        );
+        assert_eq!(update.board[0].latest.as_ref().unwrap().body, "Thank you");
 
         f.worker.disconnect("shop".into()).unwrap();
         let update = f.next();

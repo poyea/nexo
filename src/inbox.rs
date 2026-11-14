@@ -15,6 +15,8 @@ const MAX_TITLE_CHARS: usize = 80;
 const MAX_PREVIEW_CHARS: usize = 140;
 /// The most characters of a conversation that the reader shows.
 const MAX_READER_CHARS: usize = 40_000;
+const MAX_REPLY_CHARS: usize = 10_000;
+const REPLY_HEIGHT: f32 = 84.0;
 const NO_CHANNEL: &str = "Connect a channel on the Channels page to see its conversations here.";
 
 /// What the user asked for on the inbox page.
@@ -31,6 +33,12 @@ pub enum InboxAction {
     Open { channel: String, id: String },
     /// Put a conversation on the board.
     Track { channel: String, id: String },
+    /// Send a reply in a conversation.
+    Reply {
+        channel: String,
+        id: String,
+        body: String,
+    },
 }
 
 /// A place for one conversation of the list. Its widgets stay, and show a different
@@ -56,6 +64,8 @@ struct Reading {
 pub struct Inbox {
     /// The channels that have a list of conversations.
     channels: Vec<String>,
+    /// The channels that can send replies.
+    repliable: Vec<String>,
     /// The channel that the list shows.
     channel: Option<String>,
     /// The search that the list shows.
@@ -74,6 +84,8 @@ pub struct Inbox {
     /// The ids of the conversations that go to the board now.
     adding: Vec<String>,
     reading: Option<Reading>,
+    /// The id of the conversation whose reply goes out now.
+    sending: Option<String>,
 
     tab_row: Id<kind::Row>,
     tabs: Vec<Id<kind::NavItem>>,
@@ -90,6 +102,10 @@ pub struct Inbox {
     reader_add: Id<kind::Button>,
     reader_title: Id<kind::Text>,
     reader_text: Id<kind::Text>,
+    reply_row: Id<kind::Row>,
+    reply_box: Id<kind::TextBox>,
+    send: Id<kind::Button>,
+    reply_note: Id<kind::Text>,
 }
 
 impl Inbox {
@@ -140,12 +156,25 @@ impl Inbox {
                 })
                 .child(reader_text),
         );
+        let reply_box = w.add(
+            TextBox::new()
+                .multiline()
+                .placeholder("Write a reply")
+                .max_length(MAX_REPLY_CHARS)
+                .width(Length::Fill(1.0))
+                .height(Length::Fixed(REPLY_HEIGHT)),
+        );
+        let send = w.add(Button::new("Send").accent());
+        let reply_row = w.add(Row::new().gap(8.0).child(reply_box).child(send));
+        let reply_note = w.add(Text::new("").style(TextStyle::Caption));
         let reader = w.add(
             Column::new()
                 .gap(8.0)
                 .child(buttons)
                 .child(reader_title)
-                .child(text),
+                .child(text)
+                .child(reply_row)
+                .child(reply_note),
         );
 
         let views = w.add(
@@ -165,6 +194,7 @@ impl Inbox {
         );
         let mut inbox = Self {
             channels: Vec::new(),
+            repliable: Vec::new(),
             channel: None,
             query: String::new(),
             pages: vec![None],
@@ -175,6 +205,7 @@ impl Inbox {
             loading: false,
             adding: Vec::new(),
             reading: None,
+            sending: None,
             tab_row,
             tabs,
             search,
@@ -190,19 +221,30 @@ impl Inbox {
             reader_add,
             reader_title,
             reader_text,
+            reply_row,
+            reply_box,
+            send,
+            reply_note,
         };
         inbox.show(w);
         (inbox, column)
     }
 
-    /// Tell the inbox which channels have a list of conversations. It keeps the channel that
-    /// shows, if that channel is there, and else shows the first one. The action, if there
-    /// is one, loads the first page of the channel that shows now.
-    pub fn set_channels(&mut self, w: &mut Window, browsable: &[String]) -> Option<InboxAction> {
-        if browsable == self.channels {
+    /// Tell the inbox which channels have a list of conversations, and which can send
+    /// replies. It keeps the channel that shows, if that channel is there, and else shows
+    /// the first one. The action, if there is one, loads the first page of the channel that
+    /// shows now.
+    pub fn set_channels(
+        &mut self,
+        w: &mut Window,
+        browsable: &[String],
+        repliable: &[String],
+    ) -> Option<InboxAction> {
+        if browsable == self.channels && repliable == self.repliable {
             return None;
         }
         self.channels = browsable.to_vec();
+        self.repliable = repliable.to_vec();
         let kept = self
             .channel
             .as_ref()
@@ -251,6 +293,15 @@ impl Inbox {
         } else if clicked == self.reader_add {
             let id = self.reading.as_ref()?.id.clone();
             self.track(channel, id)
+        } else if clicked == self.send {
+            let id = self.reading.as_ref()?.id.clone();
+            let body = w.text(self.reply_box).trim().to_owned();
+            if body.is_empty() || self.sending.is_some() {
+                return None;
+            }
+            self.sending = Some(id.clone());
+            w.set_text(self.reply_note, "");
+            Some(InboxAction::Reply { channel, id, body })
         } else {
             let (slot, item) = self
                 .slots
@@ -266,6 +317,8 @@ impl Inbox {
                     title,
                 });
                 w.set_text(self.reader_text, "Loading");
+                w.set_text(self.reply_box, "");
+                w.set_text(self.reply_note, "");
                 Some(InboxAction::Open { channel, id })
             }
         };
@@ -333,6 +386,39 @@ impl Inbox {
             Err(problem) => w.set_text(self.status, problem),
         }
         self.show(w);
+    }
+
+    /// A reply went out, or did not. After a reply that went out, the action loads the
+    /// conversation again, if the reader shows it.
+    pub fn replied(
+        &mut self,
+        w: &mut Window,
+        id: &str,
+        result: &Result<(), String>,
+    ) -> Option<InboxAction> {
+        self.sending = None;
+        let reading = self.reading.as_ref().is_some_and(|r| r.id == id);
+        let mut action = None;
+        match result {
+            Ok(()) => {
+                // A reply puts its conversation on the board.
+                for item in self.items.iter_mut().filter(|item| item.id == id) {
+                    item.tracked = true;
+                }
+                if reading {
+                    w.set_text(self.reply_box, "");
+                    w.set_text(self.reply_note, "Sent");
+                    action = self.channel.clone().map(|channel| InboxAction::Open {
+                        channel,
+                        id: id.to_owned(),
+                    });
+                }
+            }
+            Err(problem) if reading => w.set_text(self.reply_note, &not_sent(problem)),
+            Err(problem) => w.set_text(self.status, &not_sent(problem)),
+        }
+        self.show(w);
+        action
     }
 
     fn track(&mut self, channel: String, id: String) -> Option<InboxAction> {
@@ -429,6 +515,18 @@ impl Inbox {
             w.set_text(self.reader_add, add_label(tracked, adding));
             w.set_enabled(self.reader_add, !tracked && !adding);
         }
+        let can_reply = self
+            .channel
+            .as_ref()
+            .is_some_and(|channel| self.repliable.contains(channel));
+        let sending = self.sending.is_some();
+        w.set_visible(self.reply_row, can_reply);
+        w.set_enabled(self.reply_box, !sending);
+        w.set_enabled(self.send, !sending);
+        w.set_text(self.send, if sending { "Sending" } else { "Send" });
+        if let (false, Some(channel)) = (can_reply, &self.channel) {
+            w.set_text(self.reply_note, &no_replies(channel));
+        }
     }
 }
 
@@ -469,6 +567,14 @@ fn tab_label(channel: &str) -> String {
         Some(first) => first.to_uppercase().chain(chars).collect(),
         None => String::new(),
     }
+}
+
+fn no_replies(channel: &str) -> String {
+    format!("{} cannot send replies.", tab_label(channel))
+}
+
+fn not_sent(problem: &str) -> String {
+    format!("Not sent: {problem}")
 }
 
 fn add_label(tracked: bool, adding: bool) -> &'static str {
@@ -561,6 +667,12 @@ mod tests {
     fn a_tab_has_the_name_of_its_channel() {
         assert_eq!(tab_label("gmail"), "Gmail");
         assert_eq!(tab_label(""), "");
+    }
+
+    #[test]
+    fn the_reader_tells_why_there_is_no_reply() {
+        assert_eq!(no_replies("linkedin"), "Linkedin cannot send replies.");
+        assert_eq!(not_sent("offline"), "Not sent: offline");
     }
 
     #[test]
