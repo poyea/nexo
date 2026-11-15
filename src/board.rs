@@ -13,8 +13,11 @@ use glasskit::window::{Window, WindowEvent};
 use nexo_core::{Card as Conversation, Stage};
 use serde::{Deserialize, Serialize};
 
-/// The lanes of the stages of a conversation. The user can add more lanes after them.
+/// The names of the lanes of the stages of a conversation, in the order of `Stage::ALL`.
+/// The user can change them, add more lanes, and put the lanes in another order.
 const LANES: [&str; 3] = ["To do", "Waiting", "Done"];
+/// The names of the stages in the file, in the same order.
+const STAGES: [&str; 3] = ["to_reply", "waiting", "done"];
 const MAX_TITLE_CHARS: usize = 60;
 
 /// What the user asked for on the board.
@@ -42,6 +45,11 @@ struct SavedLane {
     /// A lane without a name has the name of its stage.
     #[serde(default)]
     name: Option<String>,
+    /// The stage whose conversations are in the lane. A lane of the user has none. A file
+    /// with no stage at all is from before the user could move lanes: its first three
+    /// lanes are the stages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stage: Option<String>,
     #[serde(default)]
     color: Option<String>,
     #[serde(default)]
@@ -67,6 +75,8 @@ pub struct Board {
     path: PathBuf,
     add_lane: Id<kind::Button>,
     archived: Id<kind::Button>,
+    /// The lane of each stage, in the order of `Stage::ALL`.
+    stages: [usize; 3],
     /// The card of each conversation.
     conversations: Vec<(CardKey, Conversation)>,
 }
@@ -74,23 +84,16 @@ pub struct Board {
 impl Board {
     /// Make the widgets with the tasks of the file, and give the column that holds them.
     pub fn build(w: &mut Window, path: &Path) -> Result<(Self, Id<kind::Column>)> {
-        let mut lanes = Lanes::new(w, &LANES);
-        for lane in 0..LANES.len() {
+        let (saved, stages) = arrange(load(path)?);
+        let names: Vec<&str> = saved
+            .iter()
+            .map(|lane| lane.name.as_deref().unwrap_or_default())
+            .collect();
+        let mut lanes = Lanes::new(w, &names);
+        for lane in stages {
             lanes.set_lane_fixed(lane, true);
         }
-        for (lane, saved) in load(path)?.lanes.into_iter().enumerate() {
-            let name = saved
-                .name
-                .as_deref()
-                .map(str::trim)
-                .filter(|n| !n.is_empty());
-            match name {
-                _ if lane >= lanes.lane_count() => {
-                    lanes.add_lane(w, name.unwrap_or("Lane"));
-                }
-                Some(name) => lanes.set_lane_name(w, lane, name),
-                None => {}
-            }
+        for (lane, saved) in saved.into_iter().enumerate() {
             lanes.set_lane_tint(w, lane, tint(saved.color.as_deref()));
             for card in saved.cards {
                 let card = CardData {
@@ -126,6 +129,7 @@ impl Board {
             path: path.to_owned(),
             add_lane,
             archived,
+            stages,
             conversations: Vec::new(),
         };
         Ok((board, column))
@@ -134,6 +138,7 @@ impl Board {
     /// Show these conversations as cards, each in the lane of its stage.
     pub fn set(&mut self, w: &mut Window, cards: &[Conversation]) {
         let same = |a: &Conversation, b: &Conversation| a.channel == b.channel && a.id == b.id;
+        let stages = self.stages;
         let lanes = &mut self.lanes;
         self.conversations.retain(|(key, old)| {
             let stays = cards.iter().any(|card| same(card, old));
@@ -147,7 +152,7 @@ impl Board {
                 locked: true,
                 ..CardData::new(title(&card.title), note(card))
             };
-            let lane = lane_of(card.stage);
+            let lane = stages[stage_index(card.stage)];
             match self
                 .conversations
                 .iter_mut()
@@ -207,8 +212,20 @@ impl Board {
                 Some(card) => Ok(self.dropped(w, *key, &card)),
                 None => self.save().map(|()| None),
             },
+            BoardEvent::LaneMoved { from, to } => {
+                self.stages = self.stages.map(|lane| moved(lane, *from, *to));
+                self.save().map(|()| None)
+            }
+            BoardEvent::LaneRemoved { lane: removed, .. } => {
+                self.stages = self.stages.map(|lane| lane - usize::from(lane > *removed));
+                self.save().map(|()| None)
+            }
             _ => self.save().map(|()| None),
         }
+    }
+
+    fn lane_of(&self, stage: Stage) -> usize {
+        self.stages[stage_index(stage)]
     }
 
     /// A conversation went to another lane. Only the Done lane has a meaning for it: the
@@ -220,11 +237,11 @@ impl Board {
         card: &Conversation,
     ) -> Option<BoardAction> {
         let (lane, _) = self.lanes.place(key)?;
-        let done = lane == lane_of(Stage::Done);
+        let done = lane == self.lane_of(Stage::Done);
         if done == (card.stage == Stage::Done) {
-            if lane != lane_of(card.stage) {
-                self.lanes
-                    .move_card(w, key, lane_of(card.stage), usize::MAX);
+            let own = self.lane_of(card.stage);
+            if lane != own {
+                self.lanes.move_card(w, key, own, usize::MAX);
             }
             return None;
         }
@@ -239,6 +256,11 @@ impl Board {
         let lanes = (0..self.lanes.lane_count())
             .map(|lane| SavedLane {
                 name: self.lanes.lane_name(lane).map(str::to_owned),
+                stage: self
+                    .stages
+                    .iter()
+                    .position(|&at| at == lane)
+                    .map(|stage| STAGES[stage].to_owned()),
                 color: self.lanes.lane_tint(lane).map(color),
                 cards: self
                     .lanes
@@ -280,12 +302,57 @@ fn color(tint: Tint) -> String {
     tint.name().to_lowercase()
 }
 
-fn lane_of(stage: Stage) -> usize {
+/// The place of a stage in `Stage::ALL`.
+fn stage_index(stage: Stage) -> usize {
     match stage {
         Stage::ToReply => 0,
         Stage::Waiting => 1,
         Stage::Done => 2,
     }
+}
+
+/// The index of a lane after the lane at `from` went to `to`.
+fn moved(lane: usize, from: usize, to: usize) -> usize {
+    if lane == from {
+        return to;
+    }
+    let without = lane - usize::from(lane > from);
+    without + usize::from(without >= to)
+}
+
+/// The lanes of a file in their order, each with a name, and the lane of each stage. A
+/// stage that has no lane in the file gets a new lane at the end.
+fn arrange(saved: Saved) -> (Vec<SavedLane>, [usize; 3]) {
+    let mut lanes = saved.lanes;
+    let known = |lane: &SavedLane| lane.stage.as_deref().is_some_and(|s| STAGES.contains(&s));
+    if !lanes.iter().any(known) {
+        for (lane, stage) in lanes.iter_mut().zip(STAGES) {
+            lane.stage = Some(stage.to_owned());
+        }
+    }
+    let stages = STAGES.map(|stage| {
+        let found = lanes
+            .iter()
+            .position(|lane| lane.stage.as_deref() == Some(stage));
+        found.unwrap_or_else(|| {
+            lanes.push(SavedLane {
+                stage: Some(stage.to_owned()),
+                ..SavedLane::default()
+            });
+            lanes.len() - 1
+        })
+    });
+    for (index, lane) in lanes.iter_mut().enumerate() {
+        let stage = stages.iter().position(|&at| at == index);
+        lane.stage = stage.map(|stage| STAGES[stage].to_owned());
+        let name = lane.name.as_deref().map(str::trim).unwrap_or_default();
+        lane.name = Some(match (name, stage) {
+            ("", Some(stage)) => LANES[stage].to_owned(),
+            ("", None) => "Lane".to_owned(),
+            (name, _) => name.to_owned(),
+        });
+    }
+    (lanes, stages)
 }
 
 /// The title, cut to a length that keeps the card small.
@@ -312,27 +379,94 @@ fn note(card: &Conversation) -> String {
 mod tests {
     use super::*;
 
+    fn lane(name: Option<&str>, stage: Option<&str>) -> SavedLane {
+        SavedLane {
+            name: name.map(str::to_owned),
+            stage: stage.map(str::to_owned),
+            ..SavedLane::default()
+        }
+    }
+
+    fn names(lanes: &[SavedLane]) -> Vec<&str> {
+        lanes.iter().map(|l| l.name.as_deref().unwrap()).collect()
+    }
+
     #[test]
     fn a_lane_of_the_user_keeps_its_name_in_the_file() {
         let saved = Saved {
             lanes: vec![
-                SavedLane::default(),
+                lane(None, Some("done")),
                 SavedLane {
-                    name: Some("Ideas".into()),
                     color: Some("teal".into()),
-                    cards: Vec::new(),
+                    ..lane(Some("Ideas"), None)
                 },
             ],
         };
         let text = serde_json::to_string(&saved).unwrap();
         assert_eq!(serde_json::from_str::<Saved>(&text).unwrap(), saved);
+        assert_eq!(text.matches("stage").count(), 1);
     }
 
     #[test]
-    fn each_stage_has_a_lane() {
-        let lanes = Stage::ALL.map(lane_of);
-        assert_eq!(lanes, [0, 1, 2]);
-        assert_eq!(LANES[lane_of(Stage::Done)], "Done");
+    fn an_empty_file_gives_the_lanes_of_the_stages() {
+        let (lanes, stages) = arrange(Saved::default());
+        assert_eq!(names(&lanes), LANES);
+        assert_eq!(stages, Stage::ALL.map(stage_index));
+        assert_eq!(lanes[2].stage.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn a_file_without_stages_has_them_in_its_first_lanes() {
+        let saved = Saved {
+            lanes: vec![
+                lane(Some("Reply"), None),
+                lane(None, None),
+                lane(None, None),
+                lane(Some("Ideas"), None),
+            ],
+        };
+        let (lanes, stages) = arrange(saved);
+        assert_eq!(names(&lanes), ["Reply", "Waiting", "Done", "Ideas"]);
+        assert_eq!(stages, [0, 1, 2]);
+        assert_eq!(lanes[3].stage, None);
+    }
+
+    #[test]
+    fn the_lanes_of_the_stages_keep_the_order_of_the_file() {
+        let saved = Saved {
+            lanes: vec![
+                lane(Some("Finished"), Some("done")),
+                lane(Some("Ideas"), None),
+                lane(None, Some("to_reply")),
+                lane(Some("Copy"), Some("done")),
+                lane(None, Some("later")),
+            ],
+        };
+        let (lanes, stages) = arrange(saved);
+        assert_eq!(
+            names(&lanes),
+            ["Finished", "Ideas", "To do", "Copy", "Lane", "Waiting"]
+        );
+        assert_eq!(stages, [2, 5, 0]);
+        assert_eq!(lanes[3].stage, None);
+        assert_eq!(lanes[4].stage, None);
+    }
+
+    #[test]
+    fn a_lane_that_moves_changes_the_index_of_the_lanes_between() {
+        // The lanes A B C D: A goes to the end, which gives B C D A.
+        assert_eq!([0, 1, 2, 3].map(|lane| moved(lane, 0, 3)), [3, 0, 1, 2]);
+        // D goes to the start, which gives D A B C.
+        assert_eq!([0, 1, 2, 3].map(|lane| moved(lane, 3, 0)), [1, 2, 3, 0]);
+        // B goes after C, which gives A C B D.
+        assert_eq!([0, 1, 2, 3].map(|lane| moved(lane, 1, 2)), [0, 2, 1, 3]);
+    }
+
+    #[test]
+    fn each_stage_has_a_name_for_its_lane_and_for_the_file() {
+        assert_eq!(Stage::ALL.map(stage_index), [0, 1, 2]);
+        assert_eq!(LANES[stage_index(Stage::Done)], "Done");
+        assert_eq!(STAGES[stage_index(Stage::ToReply)], "to_reply");
     }
 
     #[test]
